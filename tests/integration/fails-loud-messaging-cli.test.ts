@@ -19,7 +19,7 @@
  * Skipped when dist/cli.js is absent (build not run).
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, mkdirSync, existsSync, readdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir, homedir } from 'os';
@@ -28,6 +28,13 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 
 const execFileAsync = promisify(execFile);
+
+// Every test here spawns a real `node dist/cli.js` subprocess. Confirmed
+// flaky (2026-07-21) under a fully parallel `npm test` run — passes every
+// time in isolation, but the default 10s testTimeout is occasionally too
+// tight once dozens of test files are competing for CPU to spawn and run a
+// full Node process each.
+vi.setConfig({ testTimeout: 30000 });
 
 const REPO_ROOT = join(__dirname, '..', '..');
 const DIST_CLI = join(REPO_ROOT, 'dist', 'cli.js');

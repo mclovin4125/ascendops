@@ -1018,7 +1018,12 @@ describe('FastChecker', () => {
       expect(watchdogCallCount(execMock)).toBe(0); // never minted a heartbeat pre-onboarding
       checker.stop();
       checker.wake();
-    });
+      // 30s: this advances 150 simulated minutes in one call — by far the
+      // largest advanceTimersByTimeAsync in this file (2026-07-21 confirmed
+      // flake: fine in isolation, occasionally exceeds the default 10s
+      // wall-clock testTimeout under a fully parallel `npm test` run since
+      // flushing that many virtual ticks still costs real CPU per tick).
+    }, 30000);
 
     // Fire-time, not arm-time: the gate re-evaluates each tick, so a session that finishes
     // onboarding then goes quiet still gets liveness without a restart.

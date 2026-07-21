@@ -20,7 +20,7 @@
  * a clear message rather than failing on a missing file.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   mkdtempSync,
   rmSync,
@@ -36,6 +36,11 @@ import { promisify } from 'util';
 import type { CronDefinition } from '../../src/types/index';
 
 const execFileAsync = promisify(execFile);
+
+// Real subprocess spawns, same class of CPU-contention flake fixed in
+// fails-loud-exit-codes-cli.test.ts / fails-loud-messaging-cli.test.ts
+// (2026-07-21) — bump the default 10s testTimeout preemptively.
+vi.setConfig({ testTimeout: 30000 });
 
 const REPO_ROOT = join(__dirname, '..', '..');
 const DIST_CLI  = join(REPO_ROOT, 'dist', 'cli.js');
