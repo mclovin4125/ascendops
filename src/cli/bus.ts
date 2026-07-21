@@ -10,6 +10,7 @@ import { saveOutput } from '../bus/save-output.js';
 import { logEvent } from '../bus/event.js';
 import { redactSSN } from '../utils/ssn-redaction.js';
 import { updateHeartbeat, readAllHeartbeats } from '../bus/heartbeat.js';
+import { parseDisplayNameFromIdentity } from '../utils/identity.js';
 import { queryCap } from '../bus/query-cap.js';
 import { selfRestart, hardRestart, autoCommit, checkGoalStaleness, postActivity } from '../bus/system.js';
 import { createExperiment, runExperiment, evaluateExperiment, listExperiments, gatherContext, manageCycle, loadExperimentConfig } from '../bus/experiment.js';
@@ -797,14 +798,16 @@ busCommand
   .option('--task <task>', 'Current task description')
   .option('--timezone <tz>', 'Timezone for day/night mode detection')
   .option('--interval <i>', 'Loop interval from cron config')
-  .action((status: string, opts: { task?: string; timezone?: string; interval?: string }) => {
+  .option('--display-name <name>', 'Override the display name (default: parsed from IDENTITY.md)')
+  .action((status: string, opts: { task?: string; timezone?: string; interval?: string; displayName?: string }) => {
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
 
-    // Read display name from IDENTITY.md so agents self-report their user-facing name
-    let displayName: string | undefined;
+    // An explicit --display-name always wins; otherwise read it from
+    // IDENTITY.md so agents self-report their user-facing name.
+    let displayName: string | undefined = opts.displayName;
     const frameworkRoot = process.env.CTX_FRAMEWORK_ROOT || process.env.CTX_PROJECT_ROOT || '';
-    if (frameworkRoot) {
+    if (!displayName && frameworkRoot) {
       const identityPaths = [
         join(frameworkRoot, 'orgs', env.org, 'agents', env.agentName, 'IDENTITY.md'),
         join(frameworkRoot, 'agents', env.agentName, 'IDENTITY.md'),
@@ -812,23 +815,7 @@ busCommand
       for (const idPath of identityPaths) {
         if (existsSync(idPath)) {
           try {
-            const lines = readFileSync(idPath, 'utf-8').split('\n');
-            // "## Name" section takes priority (user-configured display name)
-            const nameIdx = lines.findIndex(l => l.trim() === '## Name');
-            if (nameIdx >= 0) {
-              for (let i = nameIdx + 1; i < lines.length; i++) {
-                const line = lines[i].trim();
-                if (!line || line.startsWith('<!--')) continue;
-                if (line.startsWith('#')) break;
-                displayName = line;
-                break;
-              }
-            }
-            // Fallback: first non-empty, non-comment top-level heading value
-            if (!displayName) {
-              const h1 = lines.find(l => l.startsWith('# ') && !l.startsWith('## '));
-              if (h1) displayName = h1.replace(/^#\s+/, '').trim();
-            }
+            displayName = parseDisplayNameFromIdentity(readFileSync(idPath, 'utf-8'));
           } catch {
             // Skip
           }

@@ -49,4 +49,36 @@ describe('naming standardization: add-agent resolves + scaffolds the renamed tem
       rmSync(agentDir, { recursive: true, force: true });
     }
   });
+
+  it('add-agent --template maintenance-coordinator scaffolds a runnable config.json, settings.json, and a non-stub ONBOARDING.md', () => {
+    const dir = findTemplateDir(ROOT, 'maintenance-coordinator');
+    expect(dir).not.toBeNull();
+    const agentDir = mkdtempSync(join(tmpdir(), 'scaffold-maint-defect-'));
+    try {
+      copyTemplateFiles(dir as string, agentDir, 'TestMaint', 'testorg');
+
+      // config.json must use the modern schema (agent_name/enabled/tier/crons/ecosystem),
+      // with agent_name substituted, not the stale {{AGENT_NAME}}/{{MODEL}}/{{RUNTIME}} schema
+      // that add-agent's post-copy merge never fills in.
+      const config = JSON.parse(readFileSync(join(agentDir, 'config.json'), 'utf-8'));
+      expect(config.agent_name).toBe('TestMaint');
+      expect(config).toHaveProperty('enabled', true);
+      expect(config).toHaveProperty('tier');
+      expect(config).toHaveProperty('crons');
+      expect(config).toHaveProperty('ecosystem');
+      expect(JSON.stringify(config)).not.toContain('{{');
+
+      // .claude/settings.json must exist so hooks (SessionStart, approvals, etc.) are wired up.
+      expect(existsSync(join(agentDir, '.claude', 'settings.json'))).toBe(true);
+      const settings = JSON.parse(readFileSync(join(agentDir, '.claude', 'settings.json'), 'utf-8'));
+      expect(settings).toHaveProperty('hooks.SessionStart');
+
+      // ONBOARDING.md must be actual guidance, not a one-line stub.
+      const onboarding = readFileSync(join(agentDir, 'ONBOARDING.md'), 'utf-8');
+      expect(onboarding.split('\n').length).toBeGreaterThan(5);
+      expect(onboarding).toContain('CUSTOMIZE.md');
+    } finally {
+      rmSync(agentDir, { recursive: true, force: true });
+    }
+  });
 });

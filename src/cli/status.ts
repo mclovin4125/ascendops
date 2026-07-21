@@ -4,6 +4,7 @@ import { join } from 'path';
 import { homedir } from 'os';
 import { IPCClient } from '../daemon/ipc-server.js';
 import type { AgentStatus, Heartbeat } from '../types/index.js';
+import { pad } from '../utils/format.js';
 
 export const statusCommand = new Command('status')
   .option('--instance <id>', 'Instance ID')
@@ -69,9 +70,9 @@ export const statusCommand = new Command('status')
         console.log(header);
         console.log(separator);
         for (const r of rows) {
-          const name = r.agent.padEnd(18);
-          const status = r.status.padEnd(12);
-          const age = r.age.padEnd(13);
+          const name = pad(r.agent, 18);
+          const status = pad(r.status, 12);
+          const age = pad(r.age, 13);
           console.log(`  ${name}${status}${age}${r.task}`);
         }
         console.log('');
@@ -95,10 +96,10 @@ function displayStatuses(statuses: AgentStatus[]): void {
   console.log(separator);
 
   for (const s of statuses) {
-    const name = s.name.padEnd(18);
-    const status = s.status.padEnd(12);
-    const pid = (s.pid?.toString() || '-').padEnd(10);
-    const uptime = s.uptime ? formatUptime(s.uptime).padEnd(12) : '-'.padEnd(12);
+    const name = pad(s.name, 18);
+    const status = pad(s.status, 12);
+    const pid = pad(s.pid?.toString() || '-', 10);
+    const uptime = pad(s.uptime ? formatUptime(s.uptime) : '-', 12);
     const model = s.model || '-';
     console.log(`  ${name}${status}${pid}${uptime}${model}`);
   }
