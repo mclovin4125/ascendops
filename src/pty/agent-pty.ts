@@ -50,12 +50,23 @@ export class AgentPTY {
   protected config: AgentConfig;
   private onExitHandler: ((exitCode: number, signal?: number) => void) | null = null;
   private spawnFn: SpawnFn | null = null;
-  // Trust-prompt auto-accept timers. Stored so they can be cancelled when
-  // the PTY exits or is killed — otherwise a timer from a previous spawn()
-  // can fire against a RESPAWNED PTY on the same instance and write a stray
-  // Enter into the new session (the callbacks only check `this.pty`, which
-  // is truthy again after a respawn).
-  private trustPromptTimers: ReturnType<typeof setTimeout>[] = [];
+  // Trust-prompt auto-accept watcher. Stored so it can be cancelled when the
+  // PTY exits or is killed — otherwise a stale interval from a previous
+  // spawn() can fire against a RESPAWNED PTY on the same instance and write a
+  // stray Enter into the new session (the callback only checks `this.pty`,
+  // which is truthy again after a respawn).
+  //
+  // 2026-07-22 fleet outage: this used to be a fixed schedule of one-shot
+  // timers covering only the first 32s after spawn. If the trust/bypass
+  // prompt didn't appear until LATER than that (e.g. an OAuth re-login screen
+  // ate the window first, or a long-idle session only reached the prompt
+  // once something else nudged it), nothing was left watching and the agent
+  // froze until a human noticed and restarted it. The watcher now runs for
+  // the PTY's whole life (or until real bootstrap is confirmed), not just a
+  // fixed window from spawn time.
+  private trustPromptOneShots: ReturnType<typeof setTimeout>[] = [];
+  private trustPromptInterval: ReturnType<typeof setInterval> | null = null;
+  private trustPromptTicks = 0;
   private promptAnswerSent = false;
   private promptOutputCursor = 0;
   private bypassAnswerCount = 0;
@@ -235,45 +246,79 @@ export class AgentPTY {
     // Claude Code can show two startup gates:
     //   1. Folder trust defaults to accept, so Enter confirms it.
     //   2. Bypass Permissions defaults to "No, exit", so bare Enter kills the process.
-    // Retry through 32s while a gate remains visible, with a hard answer cap.
+    // The original dense early schedule (5s-32s) is kept exactly as-is below
+    // for responsiveness right after a normal spawn. On top of it, a slower
+    // recurring check keeps watching for as long as the PTY is alive, instead
+    // of stopping cold at 32s (see the field comment above for why: a slow
+    // OAuth re-login, or anything else delaying a gate past that window, must
+    // not leave the agent with nothing watching for it).
     this.promptAnswerSent = false;
     this.promptOutputCursor = this.outputBuffer.createSafeCursor();
     this.bypassAnswerCount = 0;
+    this.trustPromptTicks = 0;
     if (handlesClaudeTrustPrompts) {
-      for (const delayMs of [5000, 8000, 11000, 14000, 20000, 26000, 32000]) {
-        const timer = setTimeout(() => {
-          if (!this.pty) return;
-          const candidate = this.promptAnswerSent
-            ? this.outputBuffer.getSafeTailSince(this.promptOutputCursor, 4096)
-            : this.outputBuffer.getRecentTail(4096);
-          const tail = stripAnsi(candidate);
-          try {
-            const bypassGateVisible =
-              tail.includes('Yes, I accept') ||
-              tail.includes('running in Bypass Permissions mode');
-            if (bypassGateVisible && effectiveSkip !== false) {
-              if (this.bypassAnswerCount >= 3) return;
-              // Bypass Permissions defaults to exit. Move to accept, then confirm.
-              this.pty.write('\x1b[B\r');
-              this.bypassAnswerCount += 1;
-              this.promptAnswerSent = true;
-              this.promptOutputCursor = this.outputBuffer.createSafeCursor();
-              return;
-            }
-            const folderTrustVisible =
-              tail.includes('Yes, I trust this folder') ||
-              tail.includes('trust the files in this folder');
-            if (folderTrustVisible) {
-              this.pty.write('\r');
-              this.promptAnswerSent = true;
-              this.promptOutputCursor = this.outputBuffer.createSafeCursor();
-            }
-          } catch {
-            // PTY torn down between the alive check and the write. Ignore it.
+      const checkAndAnswer = (): void => {
+        if (!this.pty) return;
+        const candidate = this.promptAnswerSent
+          ? this.outputBuffer.getSafeTailSince(this.promptOutputCursor, 4096)
+          : this.outputBuffer.getRecentTail(4096);
+        const tail = stripAnsi(candidate);
+        try {
+          const bypassGateVisible =
+            tail.includes('Yes, I accept') ||
+            tail.includes('running in Bypass Permissions mode');
+          if (bypassGateVisible && effectiveSkip !== false) {
+            if (this.bypassAnswerCount >= 3) return;
+            // Bypass Permissions defaults to exit. Move to accept, then confirm.
+            this.pty.write('\x1b[B\r');
+            this.bypassAnswerCount += 1;
+            this.promptAnswerSent = true;
+            this.promptOutputCursor = this.outputBuffer.createSafeCursor();
+            return;
           }
-        }, delayMs);
-        this.trustPromptTimers.push(timer);
+          const folderTrustVisible =
+            tail.includes('Yes, I trust this folder') ||
+            tail.includes('trust the files in this folder');
+          if (folderTrustVisible) {
+            this.pty.write('\r');
+            this.promptAnswerSent = true;
+            this.promptOutputCursor = this.outputBuffer.createSafeCursor();
+          }
+        } catch {
+          // PTY torn down between the alive check and the write. Ignore it.
+        }
+      };
+
+      for (const delayMs of [5000, 8000, 11000, 14000, 20000, 26000, 32000]) {
+        this.trustPromptOneShots.push(setTimeout(checkAndAnswer, delayMs));
       }
+
+      // Extended coverage: keep checking well past the original 32s window.
+      // Deliberately does NOT gate on isBootstrapped() — that helper has a
+      // false-positive on at least one real trust-dialog variant (the
+      // "No, continue without these permissions" cancel-label wording matches
+      // its own "permissions" bootstrap pattern), so trusting it here could
+      // make the watcher stop while a real gate is still on screen. The tick
+      // cap below is the only stopping condition besides PTY death, and the
+      // check itself only ever acts on specific known prompt text, so an
+      // idle tick is a harmless no-op.
+      this.trustPromptInterval = setInterval(() => {
+        if (!this.pty) {
+          this.clearTrustPromptTimers();
+          return;
+        }
+        this.trustPromptTicks += 1;
+        // Defense in depth against a session that never shows a recognized
+        // gate again (e.g. a real OAuth login with nobody there to complete
+        // it) leaking an interval forever. 15s * 120 = 30 minutes, generous
+        // relative to any legitimate startup gate.
+        if (this.trustPromptTicks > 120) {
+          console.warn('[claude-preflight] trust-prompt watcher gave up after 30 minutes');
+          this.clearTrustPromptTimers();
+          return;
+        }
+        checkAndAnswer();
+      }, 15000);
     }
   }
 
@@ -297,10 +342,14 @@ export class AgentPTY {
   }
 
   private clearTrustPromptTimers(): void {
-    for (const timer of this.trustPromptTimers) {
+    for (const timer of this.trustPromptOneShots) {
       clearTimeout(timer);
     }
-    this.trustPromptTimers = [];
+    this.trustPromptOneShots = [];
+    if (this.trustPromptInterval) {
+      clearInterval(this.trustPromptInterval);
+      this.trustPromptInterval = null;
+    }
   }
 
   /**

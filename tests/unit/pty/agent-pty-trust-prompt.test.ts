@@ -443,6 +443,96 @@ describe('AgentPTY trust-prompt auto-accept', () => {
     expect(handle.fake.write).not.toHaveBeenCalledWith('\r');
   });
 
+  // 2026-07-22 fleet outage fix: the watcher must not go dark after the
+  // original 32s window. A gate that only appears later (e.g. because an
+  // OAuth re-login screen came first, or the session had been sitting idle
+  // for a long time before something advanced it) must still get answered.
+  describe('extended coverage beyond the original 32s window', () => {
+    it('answers a folder-trust dialog that only appears well after 32s', async () => {
+      const handle = makeFakePty();
+      const pty = newAgentPty(handle);
+      await pty.spawn('fresh', 'hello');
+
+      vi.advanceTimersByTime(60000); // past every one-shot timer, no gate yet
+      expect(handle.fake.write).not.toHaveBeenCalled();
+
+      handle.emitData(REAL_FOLDER_TRUST_DIALOG);
+      vi.advanceTimersByTime(15000); // next extended-interval tick
+
+      expect(handle.fake.write).toHaveBeenCalledWith('\r');
+    });
+
+    it('answers a bypass dialog that only appears well after 32s', async () => {
+      const handle = makeFakePty();
+      const pty = newAgentPty(handle);
+      await pty.spawn('fresh', 'hello');
+
+      vi.advanceTimersByTime(120000);
+      handle.emitData('Bypass Permissions\n  1. No, exit\n  2. Yes, I accept\n');
+      vi.advanceTimersByTime(15000);
+
+      expect(handle.fake.write).toHaveBeenCalledWith('\x1b[B\r');
+    });
+
+    it('still caps bypass answers at three during the extended window', async () => {
+      const handle = makeFakePty();
+      const pty = newAgentPty(handle);
+      await pty.spawn('fresh', 'hello');
+
+      vi.advanceTimersByTime(60000);
+      handle.emitData('Bypass Permissions\n  1. No, exit\n  2. Yes, I accept\n');
+      vi.advanceTimersByTime(15000);
+      handle.emitData('Bypass Permissions\n  1. No, exit\n  2. Yes, I accept\n');
+      vi.advanceTimersByTime(15000);
+      handle.emitData('Bypass Permissions\n  1. No, exit\n  2. Yes, I accept\n');
+      vi.advanceTimersByTime(15000);
+      handle.emitData('Bypass Permissions\n  1. No, exit\n  2. Yes, I accept\n');
+      vi.advanceTimersByTime(15000);
+
+      expect(handle.fake.write.mock.calls.map((call) => call[0])).toEqual([
+        '\x1b[B\r',
+        '\x1b[B\r',
+        '\x1b[B\r',
+      ]);
+    });
+
+    it('gives up after ~30 minutes with a warning and stops checking', async () => {
+      const handle = makeFakePty();
+      const pty = newAgentPty(handle);
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      await pty.spawn('fresh', 'hello');
+
+      vi.advanceTimersByTime(31 * 60 * 1000); // past the 30-minute cap
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('gave up'));
+
+      warn.mockClear();
+      handle.emitData(REAL_FOLDER_TRUST_DIALOG);
+      vi.advanceTimersByTime(60000);
+
+      // Watcher already gave up — a gate appearing after the cap is not
+      // this fix's problem to solve (an operator or a different mechanism
+      // must intervene by then), but it also must not keep firing warnings
+      // or writes forever.
+      expect(handle.fake.write).not.toHaveBeenCalled();
+      expect(warn).not.toHaveBeenCalled();
+      warn.mockRestore();
+    });
+
+    it('the extended interval is cancelled by kill() same as the original timers', async () => {
+      const handle = makeFakePty();
+      const pty = newAgentPty(handle);
+      await pty.spawn('fresh', 'hello');
+
+      vi.advanceTimersByTime(60000);
+      pty.kill();
+      handle.emitExit(0);
+      handle.emitData(REAL_FOLDER_TRUST_DIALOG);
+      vi.advanceTimersByTime(60000);
+
+      expect(handle.fake.write).not.toHaveBeenCalled();
+    });
+  });
+
   it('fires Enter at 5s when the trust prompt is visible', async () => {
     const handle = makeFakePty();
     const pty = newAgentPty(handle);
