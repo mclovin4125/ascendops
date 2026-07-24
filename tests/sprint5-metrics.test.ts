@@ -1,13 +1,15 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync, mkdtempSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
+import { execSync } from 'child_process';
 import {
   collectMetrics,
   parseUsageOutput,
   storeUsageData,
   collectTelegramCommands,
   registerTelegramCommands,
+  checkUpstream,
 } from '../src/bus/metrics.js';
 
 describe('Sprint 5: Observability & Metrics', () => {
@@ -460,5 +462,54 @@ describe('Sprint 5: Observability & Metrics', () => {
       expect(result.error).toBe('Bad Request');
       expect(fetchMock).toHaveBeenCalledTimes(2);
     });
+  });
+});
+
+describe('checkUpstream', () => {
+  let upstreamDir: string;
+  let localDir: string;
+
+  function git(cwd: string, cmd: string): void {
+    execSync(`git ${cmd}`, { cwd, stdio: 'pipe' });
+  }
+
+  beforeEach(() => {
+    upstreamDir = mkdtempSync(join(tmpdir(), 'cortextos-upstream-'));
+    localDir = mkdtempSync(join(tmpdir(), 'cortextos-local-'));
+
+    git(upstreamDir, 'init -q');
+    git(upstreamDir, 'config user.email "u@test.com"');
+    git(upstreamDir, 'config user.name "Upstream"');
+    writeFileSync(join(upstreamDir, 'shared.txt'), 'v1\n');
+    git(upstreamDir, 'add shared.txt');
+    git(upstreamDir, 'commit -q -m "init"');
+
+    git(localDir, `clone -q ${upstreamDir} .`);
+    git(localDir, 'config user.email "l@test.com"');
+    git(localDir, 'config user.name "Local"');
+    git(localDir, `remote add upstream ${upstreamDir}`);
+
+    // Local diverges on a file upstream never touches again.
+    writeFileSync(join(localDir, 'shared.txt'), 'v1-local\n');
+    git(localDir, 'add shared.txt');
+    git(localDir, 'commit -q -m "local-only change"');
+
+    // Upstream advances with a genuinely new file.
+    writeFileSync(join(upstreamDir, 'new-feature.txt'), 'hello\n');
+    git(upstreamDir, 'add new-feature.txt');
+    git(upstreamDir, 'commit -q -m "add new feature"');
+  });
+
+  afterEach(() => {
+    rmSync(upstreamDir, { recursive: true, force: true });
+    rmSync(localDir, { recursive: true, force: true });
+  });
+
+  it('does not flag a locally-modified file that upstream never touched', () => {
+    const result = checkUpstream(localDir);
+    expect(result.status).toBe('updates_available');
+    const allChanged = Object.values(result.changes ?? {}).flat();
+    expect(allChanged).not.toContain('shared.txt');
+    expect(allChanged).toContain('new-feature.txt');
   });
 });
