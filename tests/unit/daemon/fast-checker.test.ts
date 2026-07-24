@@ -1982,6 +1982,34 @@ describe('FastChecker', () => {
       expect(marker.stdoutHighWater).toBe(statSync(stdoutPath).size);
     });
 
+    it('bounds the survey read to a fixed trailing window instead of the full unread region', () => {
+      // Regression test for the fleet-wide pollCycle-stall incident (2026-07-24):
+      // stdoutHighWater only advances on ctx-exhaustion restarts, so on the
+      // pollCycle-stall restart path it can sit stale for a long time while
+      // stdout.log keeps growing. watchdogCheck used to re-read and regex the
+      // ENTIRE unread region every ~1s poll cycle, which grew unbounded and
+      // eventually stalled the shared event loop for all agents on the daemon.
+      // A survey prompt buried well before the trailing window must now be
+      // missed (bounded read), proving the read no longer scales with the gap.
+      const stdoutPath = join(paths.logDir, 'stdout.log');
+      const survey = 'How is Claude doing this session?';
+      const filler = 'y'.repeat(300 * 1024); // > 256KB survey window
+      writeFileSync(
+        join(paths.stateDir, '.watchdog-restart-at'),
+        JSON.stringify({ restartedAt: Date.now() - 20 * 60 * 1000, stdoutHighWater: 0 }),
+        'utf-8',
+      );
+      writeFileSync(stdoutPath, `${survey}${filler}`, 'utf-8');
+
+      const agent = makeAgentWithDir(join(testDir, 'agent-survey-outside-window'));
+      const checker = new FastChecker(agent, paths, '/framework') as any;
+      checker.bootstrappedAt = Date.now() - checker.BOOTSTRAP_GRACE_MS - 1;
+
+      checker.watchdogCheck();
+
+      expect(agent.hardRestartSelf).not.toHaveBeenCalled();
+    });
+
     it('does not persist marker or notify when hard restart is rejected by stopped status', () => {
       const telegram = createMockTelegramApi();
       const agent = makeAgentWithDir(join(testDir, 'agent-stopped'));

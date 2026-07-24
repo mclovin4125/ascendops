@@ -898,10 +898,19 @@ export class FastChecker {
     } catch { /* non-critical */ }
 
     // Signal 1: session-survey prompt → immediate hard restart
+    // Bounded to a fixed window instead of reading the full unread region
+    // (stdoutHighWater..size). stdoutHighWater only advances on
+    // ctx-exhaustion restarts, not on pollCycle-stall restarts, so that
+    // unbounded read grew with the log every cycle between those — the root
+    // cause of the pollCycle-stall watchdog tripping itself (fleet-wide,
+    // since all agents' checkers share one Node event loop). A survey prompt
+    // always appears in recent output, so a bounded trailing window is
+    // sufficient to detect it without re-reading megabytes of stale log.
     if (size > stdoutHighWater) {
       let surveyTail = '';
       try {
-        const start = stdoutHighWater;
+        const SURVEY_WINDOW_BYTES = 256 * 1024;
+        const start = Math.max(stdoutHighWater, size - SURVEY_WINDOW_BYTES);
         const bytes = size - start;
         if (bytes > 0) {
           const fd = openSync(stdoutPath, 'r');
