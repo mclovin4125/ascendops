@@ -34,6 +34,8 @@ export class TelegramPoller {
   private callbackHandlers: CallbackHandler[] = [];
   private reactionHandlers: ReactionHandler[] = [];
   private pollInterval: number;
+  /** The currently active long-poll, cancelled by an explicit stop(). */
+  private abortController: AbortController | null = null;
   /**
    * Why the poll loop last exited. Read by AgentManager's poller-supervisor
    * (#459 supervision-gap fix) to decide whether to restart:
@@ -147,6 +149,9 @@ export class TelegramPoller {
   stop(): void {
     this.running = false;
     this.lastExitReason = 'stopped-externally';
+    // An explicit stop owns the request lifetime. Cancel the pending long-poll
+    // promptly instead of retaining network work after this poller has stopped.
+    this.abortController?.abort();
     // Release the offset-file claim so a later poller can re-bind the same
     // stateDir+suffix (e.g. after a reconnect or agent restart) without
     // tripping the collision guard.
@@ -165,8 +170,10 @@ export class TelegramPoller {
    */
   async pollOnce(): Promise<void> {
     let result;
+    const controller = new AbortController();
+    this.abortController = controller;
     try {
-      result = await this.api.getUpdates(this.offset, 1);
+      result = await this.api.getUpdates(this.offset, 1, controller.signal);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes('Conflict') || msg.includes('terminated by other getUpdates')) {
@@ -182,6 +189,8 @@ export class TelegramPoller {
         return;
       }
       throw err;
+    } finally {
+      if (this.abortController === controller) this.abortController = null;
     }
     if (!result?.result?.length) return;
 

@@ -491,7 +491,7 @@ export class AgentManager {
         // info level so operators don't think PR #11 has regressed.
         console.log(`[agent-manager] ${name} already in registry (post-crash discovery overlap, expected). Queueing restart.`);
       } else {
-        console.warn(`[agent-manager] BUG-011 REGRESSION CHECK: ${name} still in registry during startAgent — pendingRestarts queueing engaged. This should not happen with PR #11 in place.`);
+        console.warn(`[agent-manager] BUG-011 REGRESSION CHECK: ${name} still in registry during startAgent — pendingRestarts queueing engaged. This should not happen with PR #11 protections active.`);
       }
       this.pendingRestarts.add(name);
       return;
@@ -683,6 +683,7 @@ export class AgentManager {
       gmailWatch: gmailWatchOption,
       slackWatch: slackWatchOption,
       ctxRestartThreshold: config.ctx_restart_threshold,
+      turnWatchdogThresholdMinutes: config.turn_watchdog_threshold_minutes,
     });
 
     // Reset watchdog session state on actual transitions back to running.

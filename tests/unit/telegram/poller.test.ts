@@ -306,4 +306,30 @@ describe('TelegramPoller — offset-file collision guard', () => {
       rmSync(other, { recursive: true, force: true });
     }
   });
+
+  it('stop() aborts the in-flight getUpdates request', async () => {
+    let seenSignal: AbortSignal | undefined;
+    const api = {
+      getUpdates: vi.fn((_offset: number, _timeout: number, signal?: AbortSignal) => {
+        seenSignal = signal;
+        return new Promise((_resolve, reject) => {
+          signal?.addEventListener('abort', () => {
+            reject(new Error('Telegram API request aborted: getUpdates'));
+          });
+        });
+      }),
+    } as unknown as TelegramAPI;
+
+    const poller = new TelegramPoller(api, stateDir);
+    const pollPromise = poller.pollOnce();
+    await Promise.resolve();
+
+    expect(seenSignal).toBeDefined();
+    expect(seenSignal!.aborted).toBe(false);
+
+    poller.stop();
+
+    expect(seenSignal!.aborted).toBe(true);
+    await expect(pollPromise).rejects.toThrow(/aborted/);
+  });
 });

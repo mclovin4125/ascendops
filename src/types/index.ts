@@ -314,6 +314,8 @@ export interface AgentConfig {
   ctx_handoff_threshold?: number;
   /** Context window % at which to trigger graceful restart (Signal 3). Default: 70. */
   ctx_restart_threshold?: number;
+  /** Open-turn inactivity threshold in minutes. Default: 30. */
+  turn_watchdog_threshold_minutes?: number;
   /**
    * Fallback context window cap (tokens) for codex-app-server agents when the
    * server's `thread/tokenUsage/updated` event reports `modelContextWindow=null`.

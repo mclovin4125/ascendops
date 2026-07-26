@@ -51,6 +51,9 @@ export class AgentProcess {
   private sessionStart: Date | null = null;
   private status: AgentStatus['status'] = 'stopped';
   private stopping: boolean = false;
+  private startPromise: Promise<void> | null = null;
+  private stopPromise: Promise<void> | null = null;
+  private sessionRefreshPromise: Promise<void> | null = null;
   // BUG-040 fix: persists across stop() return until handleExit clears it.
   // Required because BUG-032's CRLF + 5s wait can cause graceful shutdown to
   // exceed the 5s Promise.race timeout in stop(), which would otherwise reset
@@ -92,6 +95,10 @@ export class AgentProcess {
   // a handoff doc marker. start() reads this after spawn to decide whether the
   // daemon should fire runtime-owned lifecycle Telegram directly.
   private lastSpawnWasHandoff = false;
+  // Wall-clock signal for the most recent successful daemon-owned
+  // injection. FastChecker compares this with the Stop hook's idle timestamp
+  // to distinguish an open turn from an idle session.
+  private lastInjectedAt: number = 0;
 
   constructor(name: string, env: CtxEnv, config: AgentConfig, log?: LogFn) {
     this.name = name;
@@ -119,6 +126,18 @@ export class AgentProcess {
    * Start the agent. Spawns Claude Code in a PTY.
    */
   async start(options: StartOptions = {}): Promise<void> {
+    if (this.startPromise) return this.startPromise;
+
+    const operation = this.performStart(options);
+    this.startPromise = operation;
+    try {
+      await operation;
+    } finally {
+      if (this.startPromise === operation) this.startPromise = null;
+    }
+  }
+
+  private async performStart(options: StartOptions): Promise<void> {
     if (this.status === 'running') {
       this.log('Already running');
       return;
@@ -253,7 +272,18 @@ export class AgentProcess {
    * Stop the agent gracefully.
    */
   async stop(): Promise<void> {
-    if (this.stopping) return;
+    if (this.stopPromise) return this.stopPromise;
+
+    const operation = this.performStop();
+    this.stopPromise = operation;
+    try {
+      await operation;
+    } finally {
+      if (this.stopPromise === operation) this.stopPromise = null;
+    }
+  }
+
+  private async performStop(): Promise<void> {
     this.stopping = true;
     // BUG-040 fix: stopRequested persists ACROSS stop()'s return until
     // handleExit clears it. This is the safety net for the case where the
@@ -391,6 +421,18 @@ export class AgentProcess {
    * conversation directory still has .jsonl files (shouldContinue() is true).
    */
   async sessionRefresh(): Promise<void> {
+    if (this.sessionRefreshPromise) return this.sessionRefreshPromise;
+
+    const operation = this.performSessionRefresh();
+    this.sessionRefreshPromise = operation;
+    try {
+      await operation;
+    } finally {
+      if (this.sessionRefreshPromise === operation) this.sessionRefreshPromise = null;
+    }
+  }
+
+  private async performSessionRefresh(): Promise<void> {
     if (this.status === 'halted' || this.status === 'stopped') {
       this.log(`Refusing session refresh in status=${this.status}`);
       return;
@@ -413,9 +455,42 @@ export class AgentProcess {
     } catch (err) {
       this.log(`Failed to write .session-refresh marker: ${err}`);
     }
-    await this.stop();
-    await this.start();
-    this.log('Session refreshed');
+    const retryBackoffsMs = [1_000, 5_000];
+    let lastError: Error | null = null;
+
+    for (let attempt = 1; attempt <= retryBackoffsMs.length + 1; attempt++) {
+      try {
+        await this.stop();
+        await this.start();
+        if (!this.pty || this.status !== 'running') {
+          throw new Error(`start returned without a running PTY (status=${this.status})`);
+        }
+        this.log(attempt === 1 ? 'Session refreshed' : `Session refreshed on retry ${attempt}`);
+        return;
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+        const backoffMs = retryBackoffsMs[attempt - 1] ?? 0;
+        this.appendSessionRefreshToRestartsLog('SESSION_REFRESH_RETRY', attempt, backoffMs, lastError);
+        if (attempt <= retryBackoffsMs.length) {
+          this.log(`Session refresh attempt ${attempt} failed: ${lastError.message}; retrying in ${backoffMs / 1000}s`);
+          await sleep(backoffMs);
+        }
+      }
+    }
+
+    const reason = `session refresh failed after 3 attempts: ${lastError?.message ?? 'unknown error'}`;
+    this.appendSessionRefreshToRestartsLog('SESSION_REFRESH_ESCALATION', 3, 0, lastError);
+    this.log(`Escalating failed session refresh to a fresh hard restart: ${reason}`);
+    try {
+      await this.hardRestartSelf(reason);
+    } catch (err) {
+      const escalationError = err instanceof Error ? err : new Error(String(err));
+      this.appendSessionRefreshToRestartsLog('SESSION_REFRESH_ESCALATION_FAILED', 3, 0, escalationError);
+      // Enter the normal crash-recovery path so a failed fresh restart still
+      // gets another scheduled start instead of leaving the agent permanently dead.
+      this.handleExit(1);
+      throw escalationError;
+    }
   }
 
   /**
@@ -443,7 +518,12 @@ export class AgentProcess {
       // inherit AgentPTY. Feed it through the same write path used historically.
       injectMessageIntoPty((data) => this.pty?.write(data), content);
     }
+    this.lastInjectedAt = Date.now();
     return { ok: true };
+  }
+
+  getLastInjectedAt(): number {
+    return this.lastInjectedAt;
   }
 
   /**
@@ -964,7 +1044,7 @@ export class AgentProcess {
     if (!launchDir) return false;
 
     // Claude projects dir uses the absolute path with all separators replaced by dashes
-    // e.g. /Users/foo/agents/boss -> -Users-foo-agents-boss (leading sep becomes -)
+    // e.g. /home/example/agents/boss -> -home-example-agents-boss (leading sep becomes -)
     // Use homedir() for cross-platform compatibility (HOME is not set on Windows).
     const convDir = join(
       homedir(),
@@ -1424,6 +1504,27 @@ export class AgentProcess {
       appendFileSync(join(logDir, 'restarts.log'), logLine, 'utf-8');
     } catch {
       /* swallow — never break crash recovery on a logging failure */
+    }
+  }
+
+  private appendSessionRefreshToRestartsLog(
+    kind: 'SESSION_REFRESH_RETRY' | 'SESSION_REFRESH_ESCALATION' | 'SESSION_REFRESH_ESCALATION_FAILED',
+    attempt: number,
+    backoffMs: number,
+    error: Error | null,
+  ): void {
+    try {
+      const logDir = join(this.env.ctxRoot, 'logs', this.name);
+      ensureDir(logDir);
+      const timestamp = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+      const message = (error?.message ?? 'unknown error').replace(/[\r\n"]/g, ' ');
+      appendFileSync(
+        join(logDir, 'restarts.log'),
+        `[${timestamp}] ${kind}: attempt=${attempt} backoff_s=${backoffMs / 1000} error="${message}"\n`,
+        'utf-8',
+      );
+    } catch {
+      /* logging must never prevent lifecycle recovery */
     }
   }
 

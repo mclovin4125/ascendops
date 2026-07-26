@@ -116,6 +116,25 @@ beforeEach(() => {
   fsMocks.statSync.mockReset();
 });
 
+describe('AgentProcess - daemon injection timestamp', () => {
+  it('updates only after a successful PTY injection', async () => {
+    const ap = new AgentProcess('alice', mockEnv, {});
+    expect(ap.getLastInjectedAt()).toBe(0);
+    expect(ap.injectMessageDetailed('before start').ok).toBe(false);
+    expect(ap.getLastInjectedAt()).toBe(0);
+
+    await ap.start();
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-07-16T18:00:00.000Z'));
+      expect(ap.injectMessageDetailed('open the turn')).toEqual({ ok: true });
+      expect(ap.getLastInjectedAt()).toBe(Date.now());
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe('AgentProcess - BUG-011 fix (stop awaits PTY exit)', () => {
   it('stop() awaits the PTY exit handler before resolving', async () => {
     const ap = new AgentProcess('alice', mockEnv, {});
@@ -277,6 +296,96 @@ describe('AgentProcess - BUG-011 fix (stop awaits PTY exit)', () => {
     // the PTY dies must already see the marker, or it classifies a false crash.
     const markerWriteOrder = fsMocks.writeFileSync.mock.invocationCallOrder[writeIdx];
     expect(markerWriteOrder).toBeLessThan(stopSpy.mock.invocationCallOrder[0]);
+  });
+
+  it('sessionRefresh() retries a failed start and records the failure in restarts.log', async () => {
+    const ap = new AgentProcess('alice', mockEnv, {});
+    await ap.start();
+
+    vi.spyOn(ap, 'stop').mockResolvedValue();
+    const startSpy = vi.spyOn(ap, 'start')
+      .mockRejectedValueOnce(new Error('spawn failed'))
+      .mockResolvedValueOnce();
+    fsMocks.appendFileSync.mockReset();
+
+    vi.useFakeTimers();
+    try {
+      const refresh = ap.sessionRefresh();
+      await vi.advanceTimersByTimeAsync(1_000);
+      await refresh;
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(startSpy).toHaveBeenCalledTimes(2);
+    const retryLog = fsMocks.appendFileSync.mock.calls.find(
+      ([path]) => String(path).endsWith('/logs/alice/restarts.log'),
+    );
+    expect(retryLog).toBeDefined();
+    expect(String(retryLog?.[1])).toMatch(/SESSION_REFRESH_RETRY: attempt=1 backoff_s=1 error="spawn failed"/);
+  });
+
+  it('concurrent stop() callers await the same shutdown instead of returning early', async () => {
+    const ap = new AgentProcess('alice', mockEnv, {});
+    await ap.start();
+
+    let firstResolved = false;
+    let secondResolved = false;
+    const first = ap.stop().then(() => { firstResolved = true; });
+    const second = ap.stop().then(() => { secondResolved = true; });
+
+    await Promise.resolve();
+    expect(firstResolved).toBe(false);
+    expect(secondResolved).toBe(false);
+
+    capturedOnExit!(0, 0);
+    await Promise.all([first, second]);
+    expect(firstResolved).toBe(true);
+    expect(secondResolved).toBe(true);
+    expect(mockPty.kill).toHaveBeenCalledTimes(1);
+  }, 10_000);
+
+  it('concurrent start() callers share one PTY spawn', async () => {
+    let releaseSpawn!: () => void;
+    mockPty.spawn.mockImplementationOnce(() => new Promise<void>((resolve) => {
+      releaseSpawn = resolve;
+    }));
+
+    const ap = new AgentProcess('alice', mockEnv, {});
+    const first = ap.start();
+    const second = ap.start();
+
+    await Promise.resolve();
+    expect(mockPty.spawn).toHaveBeenCalledTimes(1);
+
+    releaseSpawn();
+    await Promise.all([first, second]);
+    expect(ap.getStatus().status).toBe('running');
+  });
+
+  it('sessionRefresh() escalates exhausted retries to a fresh hard restart', async () => {
+    const ap = new AgentProcess('alice', mockEnv, {});
+    await ap.start();
+
+    vi.spyOn(ap, 'stop').mockResolvedValue();
+    vi.spyOn(ap, 'start').mockRejectedValue(new Error('persistent spawn failure'));
+    const hardRestartSpy = vi.spyOn(ap, 'hardRestartSelf').mockResolvedValue();
+    fsMocks.appendFileSync.mockReset();
+
+    vi.useFakeTimers();
+    try {
+      const refresh = ap.sessionRefresh();
+      await vi.advanceTimersByTimeAsync(6_000);
+      await refresh;
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(hardRestartSpy).toHaveBeenCalledOnce();
+    expect(hardRestartSpy).toHaveBeenCalledWith(expect.stringContaining('session refresh failed after 3 attempts'));
+    const lines = fsMocks.appendFileSync.mock.calls.map(([, line]) => String(line));
+    expect(lines.filter((line) => line.includes('SESSION_REFRESH_RETRY'))).toHaveLength(3);
+    expect(lines.some((line) => line.includes('SESSION_REFRESH_ESCALATION'))).toBe(true);
   });
 });
 

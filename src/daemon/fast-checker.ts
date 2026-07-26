@@ -18,6 +18,8 @@ import { KEYS } from '../pty/inject.js';
 import { stripControlChars, sanitizeForPtyInjection, wrapFenceSafe, validateOrgName } from '../utils/validate.js';
 import { resolve as pathResolve } from 'path';
 import { atomicWriteSync } from '../utils/atomic.js';
+import { logEvent } from '../bus/event.js';
+import { updateHeartbeat } from '../bus/heartbeat.js';
 // added 2026-04-29 via internal dispatch — RFC #15 Day-1 dispatcher integration; Piece 3 (handler-type wiring) deferred to Day-2
 import { loadHookRegistry, matchHooks, dispatchHook, type HookRegistry } from '../bus/hooks.js';
 import { registerBuiltInHandlers } from '../bus/hook-handlers/index.js';
@@ -50,6 +52,49 @@ type WatchdogRestartMarker = {
   restartedAt: number;
   stdoutHighWater: number;
 };
+
+const ANSI_OSC_RE = /\x1b\][^\x07]*(?:\x07|\x1b\\)/g;
+const ANSI_CSI_RE = /\x1b\[[0-?]*[ -/]*[@-~]/g;
+const SPINNER_ONLY_RE = /^[\s⠀-⣿|/\\\-◐-◓◰-◳✢✳✶✻✽·•*+◯○●◦]+$/u;
+const SPINNER_STATUS_RE = /^[⠀-⣿◐-◓◰-◳✢✳✶✻✽·◯○●◦]\s*/u;
+const STATUS_SHAPED_PREFIX_RE = /^[⠀-⣿|/\\\-◐-◓◰-◳✢✳✶✻✽·•*+◯○●◦]/u;
+const MAX_MEANINGFUL_STDOUT_DELTA_BYTES = 256 * 1024;
+
+export function meaningfulPrintableLines(chunk: string): string[] {
+  return chunk
+    .replace(ANSI_OSC_RE, '')
+    .replace(ANSI_CSI_RE, '')
+    .split(/[\r\n]+/)
+    .map((line) => line.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '').trim())
+    .filter((line) => line.length > 0 && !SPINNER_ONLY_RE.test(line) && !SPINNER_STATUS_RE.test(line));
+}
+
+function normalizeStatusLineForFingerprint(line: string): string {
+  const statusShaped = STATUS_SHAPED_PREFIX_RE.test(line) || /tokens|↓|↑|esc to interrupt/i.test(line);
+  return statusShaped ? line.replace(/\d+/g, '#') : line;
+}
+
+type FileRangeOps = {
+  openSync: (path: string, flags: string) => number;
+  readSync: (fd: number, buffer: Buffer, offset: number, length: number, position: number) => number;
+  closeSync: (fd: number) => void;
+};
+
+export function readFileRangeSync(
+  path: string,
+  position: number,
+  length: number,
+  ops: FileRangeOps = { openSync, readSync, closeSync },
+): Buffer {
+  const fd = ops.openSync(path, 'r');
+  try {
+    const buffer = Buffer.alloc(length);
+    ops.readSync(fd, buffer, 0, length, position);
+    return buffer;
+  } finally {
+    ops.closeSync(fd);
+  }
+}
 
 /**
  * Post-boot grace window (ms) during which soft context-handoff actions are
@@ -158,6 +203,22 @@ export class FastChecker {
   private readonly BOOTSTRAP_GRACE_MS = 10 * 60 * 1000;
   private readonly HARD_RESTART_COOLDOWN_MS = 15 * 60 * 1000;
   private readonly STDOUT_FROZEN_MS = 30 * 60 * 1000;
+  private turnWatchdogThresholdMs: number = 30 * 60 * 1000;
+  private turnWatchdogRecoveryFile: string = '';
+  private turnWatchdogRecoveries: number[] = [];
+  private turnWatchdogRecoveryStateValid: boolean = true;
+  private turnWatchdogAlertedInjectAt: number = 0;
+  private turnWatchdogTrackedInjectAt: number = 0;
+  private stdoutMeaningfulOffset: number = -1;
+  private meaningfulOutputFingerprints: Set<string> = new Set();
+  private lastMeaningfulOutputAt: number = 0;
+  private turnHung: boolean = false;
+  private sessionStartedAt: number = Date.now();
+  private idleFlagSeenThisSession: boolean = false;
+  private idleFlagInactiveLogged: boolean = false;
+  private readonly fileRangeOps: FileRangeOps;
+  private readonly TURN_WATCHDOG_MAX_RECOVERIES = 2;
+  private readonly TURN_WATCHDOG_WINDOW_MS = 6 * 60 * 60 * 1000;
   // Context-threshold graceful restart state (Signal 3)
   private ctxThresholdPct: number = 70;
   private ctxThresholdTriggeredAt: number = 0;
@@ -308,6 +369,8 @@ export class FastChecker {
         teamMembers?: TeamMember[];
       };
       ctxRestartThreshold?: number;
+      turnWatchdogThresholdMinutes?: number;
+      fileRangeOps?: FileRangeOps;
     } = {},
   ) {
     this.agent = agent;
@@ -319,11 +382,18 @@ export class FastChecker {
     this.chatId = options.chatId;
     this.allowedUserIds = options.allowedUserIds ?? (options.allowedUserId !== undefined ? [options.allowedUserId] : undefined);
     this.ctxThresholdPct = options.ctxRestartThreshold ?? 70;
+    this.fileRangeOps = options.fileRangeOps ?? { openSync, readSync, closeSync };
+    const turnThresholdMinutes = options.turnWatchdogThresholdMinutes ?? 30;
+    this.turnWatchdogThresholdMs = Number.isFinite(turnThresholdMinutes) && turnThresholdMinutes > 0
+      ? turnThresholdMinutes * 60_000
+      : 30 * 60_000;
 
     // Initialize persistent dedup
     this.dedupFilePath = join(paths.stateDir, '.message-dedup-hashes');
     this.loadDedupHashes();
     this.watchdogRestartMarkerFile = join(paths.stateDir, '.watchdog-restart-at');
+    this.turnWatchdogRecoveryFile = join(paths.stateDir, '.turn-watchdog-recoveries.json');
+    this.loadTurnWatchdogRecoveries();
 
     // Initialize Gmail watch
     if (options.gmailWatch) {
@@ -409,6 +479,10 @@ export class FastChecker {
     const onboardedMarkerPath = join(this.paths.stateDir, '.onboarded');
     this.heartbeatTimer = setInterval(() => {
       if (!existsSync(onboardedMarkerPath)) return;
+      if (this.turnHung) {
+        this.log(`Heartbeat watchdog suppressed: ${agentName} has a HUNG open turn`);
+        return;
+      }
       const ts = new Date().toISOString();
       execFile(
         'cortextos',
@@ -883,6 +957,8 @@ export class FastChecker {
       this.stdoutLastSize = size;
       this.stdoutLastChangeAt = now;
     }
+    this.syncTurnWatchdogInjection();
+    this.trackMeaningfulOutput(stdoutPath, size, now);
 
     // Read tail once — shared by Signals 3 and 4
     let tail = '';
@@ -1033,6 +1109,9 @@ export class FastChecker {
       return;
     }
 
+    this.checkStalledTurn(now);
+    if (this.turnHung) return;
+
     // Signal 2: stdout frozen for 30+ min while agent is active.
     if (
       this.lastMessageInjectedAt > 0 &&
@@ -1074,6 +1153,225 @@ export class FastChecker {
     // 00:52Z forced restart.
     this.preserveRecentHandoffDoc();
     this.agent.hardRestartSelf(reason).catch(e => this.log(`hardRestartSelf failed: ${e}`));
+  }
+
+  private trackMeaningfulOutput(stdoutPath: string, size: number, now: number): void {
+    if (this.stdoutMeaningfulOffset < 0 || size < this.stdoutMeaningfulOffset) {
+      this.stdoutMeaningfulOffset = size;
+      return;
+    }
+    if (size === this.stdoutMeaningfulOffset) return;
+
+    const bytes = size - this.stdoutMeaningfulOffset;
+    const readLength = Math.min(bytes, MAX_MEANINGFUL_STDOUT_DELTA_BYTES);
+    const readPosition = bytes > MAX_MEANINGFUL_STDOUT_DELTA_BYTES
+      ? size - readLength
+      : this.stdoutMeaningfulOffset;
+    this.stdoutMeaningfulOffset = size;
+
+    try {
+      if (bytes > MAX_MEANINGFUL_STDOUT_DELTA_BYTES) {
+        this.log(`WATCHDOG: stdout delta ${bytes}B exceeds cap; sampling tail`);
+      }
+      const buf = readFileRangeSync(stdoutPath, readPosition, readLength, this.fileRangeOps);
+
+      let foundNetNew = false;
+      for (const line of meaningfulPrintableLines(buf.toString('utf-8'))) {
+        const fingerprint = createHash('sha256').update(normalizeStatusLineForFingerprint(line)).digest('hex');
+        if (this.meaningfulOutputFingerprints.has(fingerprint)) continue;
+        this.meaningfulOutputFingerprints.add(fingerprint);
+        foundNetNew = true;
+      }
+      if (this.meaningfulOutputFingerprints.size > 1000) {
+        this.meaningfulOutputFingerprints = new Set(Array.from(this.meaningfulOutputFingerprints).slice(-1000));
+      }
+      if (foundNetNew) this.lastMeaningfulOutputAt = now;
+    } catch (err) {
+      // A log rotation/read race is non-fatal; the cursor is already re-seeded.
+      this.log(`WATCHDOG: stdout meaningful-output read failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  private observeIdleFlagWriter(): void {
+    if (this.idleFlagSeenThisSession) return;
+    try {
+      const idleFlagPath = join(this.paths.stateDir, 'last_idle.flag');
+      if (statSync(idleFlagPath).mtimeMs >= this.sessionStartedAt) {
+        this.idleFlagSeenThisSession = true;
+      }
+    } catch {
+      // Missing or unreadable means the writer has not been proven this session.
+    }
+  }
+
+  private readIdleTimestamp(): number {
+    try {
+      const path = join(this.paths.stateDir, 'last_idle.flag');
+      if (!existsSync(path)) return 0;
+      const seconds = Number.parseInt(readFileSync(path, 'utf-8').trim(), 10);
+      return Number.isFinite(seconds) ? seconds * 1000 : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  private checkStalledTurn(now: number): void {
+    this.observeIdleFlagWriter();
+    if (!this.idleFlagSeenThisSession) {
+      this.turnHung = false;
+      if (!this.idleFlagInactiveLogged) {
+        this.idleFlagInactiveLogged = true;
+        this.log('turn watchdog inactive: no Stop-hook idle-flag write observed this session (writer missing or settings drift)');
+      }
+      return;
+    }
+
+    const lastInjectAt = this.syncTurnWatchdogInjection();
+    // Accepted false negatives until the Stop-hook protocol carries turn IDs:
+    // (a) a Stop write and later inject in the same wall-clock second look closed;
+    // (b) an inject arriving mid-turn can be closed by that turn's later Stop.
+    // Keep this strict: >= would falsely kill quick turns.
+    const turnOpen = lastInjectAt > 0 && Math.floor(lastInjectAt / 1000) * 1000 > this.readIdleTimestamp();
+    if (!turnOpen) {
+      this.turnHung = false;
+      return;
+    }
+
+    const progressAt = Math.max(lastInjectAt, this.lastMeaningfulOutputAt);
+    const stalledMs = now - progressAt;
+    if (stalledMs <= this.turnWatchdogThresholdMs) {
+      this.turnHung = false;
+      return;
+    }
+
+    this.handleStalledTurn(lastInjectAt, stalledMs, now);
+  }
+
+  private syncTurnWatchdogInjection(): number {
+    const lastInjectAt = this.getLastInjectedAt();
+    if (lastInjectAt !== this.turnWatchdogTrackedInjectAt) {
+      this.turnWatchdogTrackedInjectAt = lastInjectAt;
+      this.lastMeaningfulOutputAt = 0;
+      this.meaningfulOutputFingerprints.clear();
+      this.turnHung = false;
+    }
+    return lastInjectAt;
+  }
+
+  private getLastInjectedAt(): number {
+    return typeof (this.agent as AgentProcess & { getLastInjectedAt?: () => number }).getLastInjectedAt === 'function'
+      ? (this.agent as AgentProcess & { getLastInjectedAt: () => number }).getLastInjectedAt()
+      : this.lastMessageInjectedAt;
+  }
+
+  private handleStalledTurn(lastInjectAt: number, stalledMs: number, now: number): void {
+    this.turnHung = true;
+    if (this.turnWatchdogAlertedInjectAt === lastInjectAt) return;
+    this.turnWatchdogAlertedInjectAt = lastInjectAt;
+    this.loadTurnWatchdogRecoveries();
+    this.turnWatchdogRecoveries = this.turnWatchdogRecoveries.filter(
+      (timestamp) => now - timestamp < this.TURN_WATCHDOG_WINDOW_MS,
+    );
+    const recoveryStateUnavailable = !this.turnWatchdogRecoveryStateValid;
+    let recoveryAllowed = !recoveryStateUnavailable &&
+      this.turnWatchdogRecoveries.length < this.TURN_WATCHDOG_MAX_RECOVERIES;
+    let persistenceFailed = false;
+    if (recoveryAllowed) {
+      const reservedRecoveries = [...this.turnWatchdogRecoveries, now];
+      if (this.saveTurnWatchdogRecoveries(reservedRecoveries)) {
+        this.turnWatchdogRecoveries = reservedRecoveries;
+      } else {
+        recoveryAllowed = false;
+        persistenceFailed = true;
+      }
+    }
+    const stalledMinutes = Math.floor(stalledMs / 60_000);
+    const action = recoveryAllowed
+      ? 'session-refresh recovery'
+      : persistenceFailed
+        ? 'alert-only (recovery persistence failed)'
+        : recoveryStateUnavailable
+          ? 'alert-only (recovery state unavailable)'
+          : 'alert-only (recovery cap reached)';
+    const reason = `open turn stalled ${stalledMinutes}min without meaningful printable output`;
+
+    this.log(`WATCHDOG HUNG: ${this.agent.name} ${reason}; ${action}`);
+    try {
+      logEvent(this.paths, this.agent.name, process.env.CTX_ORG ?? '', 'error', 'stalled_turn_hung', 'error', {
+        last_inject_at: new Date(lastInjectAt).toISOString(),
+        last_meaningful_output_at: this.lastMeaningfulOutputAt > 0
+          ? new Date(this.lastMeaningfulOutputAt).toISOString()
+          : null,
+        stalled_minutes: stalledMinutes,
+        threshold_minutes: this.turnWatchdogThresholdMs / 60_000,
+        recovery_count_6h: this.turnWatchdogRecoveries.length,
+        action,
+      });
+    } catch (err) {
+      this.log(`WATCHDOG HUNG bus-event failure: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    try {
+      updateHeartbeat(
+        this.paths,
+        this.agent.name,
+        `[watchdog] ${this.agent.name} HUNG - ${reason}; ${action}`,
+        { org: process.env.CTX_ORG ?? '' },
+      );
+    } catch (err) {
+      this.log(`WATCHDOG HUNG heartbeat annotation failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    if (this.telegramApi && this.chatId) {
+      const telegramMessage = recoveryAllowed
+        ? `${this.agent.name} has a stalled open turn (${stalledMinutes} min without meaningful output). Refreshing the session now.`
+        : persistenceFailed
+          ? `${this.agent.name} still has a stalled open turn. Auto-recovery was not attempted because the recovery reservation could not be persisted. This alert is notification-only.`
+          : recoveryStateUnavailable
+            ? `${this.agent.name} still has a stalled open turn. Auto-recovery was not attempted because the persisted recovery state is invalid or unreadable. Repair the state file before recovery can resume.`
+            : `${this.agent.name} still has a stalled open turn. Auto-recovery is capped at 2 attempts per 6 hours, so this alert is notification-only.`;
+      this.telegramApi.sendMessage(
+        this.chatId,
+        telegramMessage,
+      ).catch((err) => this.log(`WATCHDOG HUNG Telegram alert failed: ${err instanceof Error ? err.message : String(err)}`));
+    }
+
+    if (!recoveryAllowed) return;
+    this.watchdogTriggered = true;
+    this.lastHardRestartAt = now;
+    this.preserveRecentHandoffDoc();
+    this.agent.sessionRefresh().catch((err) => this.log(`Stalled-turn session refresh failed: ${err}`));
+  }
+
+  private loadTurnWatchdogRecoveries(): void {
+    if (!existsSync(this.turnWatchdogRecoveryFile)) {
+      this.turnWatchdogRecoveries = [];
+      this.turnWatchdogRecoveryStateValid = true;
+      return;
+    }
+    try {
+      const parsed = JSON.parse(readFileSync(this.turnWatchdogRecoveryFile, 'utf-8')) as unknown;
+      if (!this.isPlainObject(parsed) ||
+          Object.keys(parsed).length !== 1 ||
+          !Array.isArray(parsed.recoveries) ||
+          !parsed.recoveries.every((value) => Number.isSafeInteger(value) && value >= 0)) {
+        throw new Error('expected { recoveries: non-negative safe-integer timestamps[] }');
+      }
+      this.turnWatchdogRecoveries = [...parsed.recoveries] as number[];
+      this.turnWatchdogRecoveryStateValid = true;
+    } catch (err) {
+      this.turnWatchdogRecoveries = [];
+      this.turnWatchdogRecoveryStateValid = false;
+      this.log(`WATCHDOG recovery state unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  private saveTurnWatchdogRecoveries(recoveries: number[]): boolean {
+    try {
+      atomicWriteSync(this.turnWatchdogRecoveryFile, JSON.stringify({ recoveries }));
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private readWatchdogRestartMarker(): WatchdogRestartMarker {
@@ -2525,6 +2823,9 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
   /** @internal */
   resetWatchdogState(): void {
     const now = Date.now();
+    this.sessionStartedAt = now;
+    this.idleFlagSeenThisSession = false;
+    this.idleFlagInactiveLogged = false;
     this.ctxHandoffFiredAt = 0;
     this.ctxHandoffDeadlineAt = 0;
     this.ctxWarningFiredAt = 0;
@@ -2536,6 +2837,17 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     this.watchdogCircuitBroken = false;
     this.watchdogRestarts = [];
     this.watchdogCircuitBrokenAt = 0;
+    this.turnHung = false;
+    this.turnWatchdogTrackedInjectAt = this.getLastInjectedAt();
+    this.turnWatchdogAlertedInjectAt = this.turnWatchdogTrackedInjectAt;
+    this.lastMeaningfulOutputAt = this.turnWatchdogTrackedInjectAt > 0 ? now : 0;
+    this.meaningfulOutputFingerprints.clear();
+    try {
+      const stdoutPath = join(this.paths.logDir, 'stdout.log');
+      this.stdoutMeaningfulOffset = existsSync(stdoutPath) ? statSync(stdoutPath).size : -1;
+    } catch {
+      this.stdoutMeaningfulOffset = -1;
+    }
     this.log('Watchdog state reset for new session');
   }
 

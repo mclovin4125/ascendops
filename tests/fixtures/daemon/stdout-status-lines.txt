@@ -1,0 +1,87 @@
+# Real stdout status shapes harvested from seven prescribed 400KB tails on 2026-07-17.
+# Whitelist extraction used whole-line DROP semantics; poison tests rejected phone, address,
+# email, and cross-source fleet-name content. Mechanical and private-cell sweeps were clean.
+# Pre-fix sum-check: T-B1a failed with zero recoveries; this fixture contains no synthetic padding.
+·…
+·on
+100 tokens · thinking)
+·51
+·3
+↓15
+·27
+10s · ↓ 72 tokens · thinking)
+↓800
+↓20
+·1.0k tokens · thinking)
+↓
+·1
+·still thinking
+·M
+·to
+·thinking more
+·n
+· thinking more)
+·ar
+↓ 13 tokens · thinking)
+↓61
+·4
+…↓63
+10s · ↑ 697 tokens · thinking)
+1.0k tokens · thinking)
+·e
+·…still thinking
+·em
+ing↓
+·t
+↑
+↓30
+M↑
+·arthinking some more
+·thinking some more
+·tg
+· still thinking)
+100 tokens)
+↑32
+·60
+·89
+·67
+10s · ↑ 754 tokens · thinking)
+·thinking
+↓3
+·o
+·i…
+30s · ↓ 12.2k tokens)
+10s · ↓ 12.6k tokens · thinking)
+·7
+·w
+·g
+·S
+·rn
+· thinking)
+10s · ↓ 16.6k tokens · thinking)
+·…thinking
+·2s…
+·wthinking
+·(B
+60s · ↓ 24.0k tokens · thinking)
+·aithinking
+↓ 25 tokens· thought for 6s)
+·225
+10s · ↓ 25 tokens · thought for 6s)
+·78
+201.0k tokens · thought for 2s)
+·r
+·C
+1m 0s· ↓ 3.2k tokens)
+↓ 25 tokens· thought for 5s)
+·rgthinking
+·ethinking
+·93
+1.0k tokens · thought for 5s)
+·Nthinking
+·sp
+·rg
+·N
+10s · ↓ 7.1k tokens)
+·arthinking
+(9s · ↓16 tokens)
