@@ -468,6 +468,8 @@ export function checkUpstream(
  * and build a list of Telegram bot commands to register.
  * The actual API call is separate (requires bot token).
  */
+const TELEGRAM_COMMAND_DESCRIPTION_MAX_LENGTH = 80;
+
 export function collectTelegramCommands(scanDirs: string[]): { command: string; description: string }[] {
   const seen = new Set<string>();
   const commands: { command: string; description: string }[] = [];
@@ -488,7 +490,13 @@ export function collectTelegramCommands(scanDirs: string[]): { command: string; 
       if (!cmd || seen.has(cmd)) continue;
       seen.add(cmd);
 
-      const description = (parsed.description || `Skill: ${name}`).slice(0, 256);
+      // Telegram documents a 256-char per-description max and a 100-command count
+      // limit, but setMyCommands also enforces an undocumented total-payload cap
+      // (observed ~6.2-6.3KB) that neither of those limits protects against — an
+      // agent with 20+ skills using full 256-char descriptions can trip
+      // BOT_COMMANDS_TOO_MUCH well under 100 commands. Cap well below that so the
+      // list keeps room to grow.
+      const description = (parsed.description || `Skill: ${name}`).slice(0, TELEGRAM_COMMAND_DESCRIPTION_MAX_LENGTH);
       commands.push({ command: cmd, description });
     }
   }
