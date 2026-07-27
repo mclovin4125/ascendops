@@ -1379,6 +1379,45 @@ busCommand
   });
 
 busCommand
+  .command('rentvine-work-orders')
+  .description('List RentVine work orders (v1, read-only)')
+  .action(async () => {
+    const { getRentVineWorkOrders } = await import('../bus/rentvine.js');
+    try {
+      console.log(JSON.stringify(await getRentVineWorkOrders(), null, 2));
+    } catch (err) {
+      console.error(`Failed to fetch RentVine work orders: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+busCommand
+  .command('rentvine-vendors')
+  .description('List RentVine vendors (v1, read-only)')
+  .action(async () => {
+    const { getRentVineVendors } = await import('../bus/rentvine.js');
+    try {
+      console.log(JSON.stringify(await getRentVineVendors(), null, 2));
+    } catch (err) {
+      console.error(`Failed to fetch RentVine vendors: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+busCommand
+  .command('rentvine-balances')
+  .description('List RentVine lease balances (v1, read-only)')
+  .action(async () => {
+    const { getRentVineLeaseBalances } = await import('../bus/rentvine.js');
+    try {
+      console.log(JSON.stringify(await getRentVineLeaseBalances(), null, 2));
+    } catch (err) {
+      console.error(`Failed to fetch RentVine lease balances: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+busCommand
   .command('send-sms')
   .description('Send an outbound SMS via Telnyx. Safe-by-default: preview only unless --send-real and --approved-by are both set.')
   .argument('<to-e164>', 'Recipient phone number in E.164 format, e.g. +12025550142')
