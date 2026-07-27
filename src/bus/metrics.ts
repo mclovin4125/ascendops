@@ -362,9 +362,16 @@ export function checkUpstream(
     commitCount = parseInt(execSync('git rev-list HEAD..upstream/main --count', { ...execOpts, stdio: 'pipe' }).trim(), 10);
   } catch { /* default 0 */ }
 
+  // Three-dot range: unlike `git log`/`git rev-list`, `git diff A..B` is just
+  // an alias for `git diff A B` (a direct tree comparison), NOT a range
+  // exclusion. That made every locally-modified file show up as "upstream
+  // overlap" even when upstream never touched it, since the diff was really
+  // comparing against our own local changes on top of the merge-base. `A...B`
+  // diffs merge-base(A,B) against B, which is the correct "what upstream
+  // actually changed since we diverged" comparison.
   let diffStat = '';
   try {
-    const stat = execSync('git diff HEAD..upstream/main --stat', { ...execOpts, stdio: 'pipe' });
+    const stat = execSync('git diff HEAD...upstream/main --stat', { ...execOpts, stdio: 'pipe' });
     const lines = stat.trim().split('\n');
     diffStat = lines[lines.length - 1] || '';
   } catch { /* ignore */ }
@@ -372,7 +379,7 @@ export function checkUpstream(
   // Categorize changed files
   let changedFiles: string[] = [];
   try {
-    changedFiles = execSync('git diff HEAD..upstream/main --name-only', { ...execOpts, stdio: 'pipe' })
+    changedFiles = execSync('git diff HEAD...upstream/main --name-only', { ...execOpts, stdio: 'pipe' })
       .trim().split('\n').filter(Boolean);
   } catch { /* ignore */ }
 

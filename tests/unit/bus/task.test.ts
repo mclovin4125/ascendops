@@ -358,6 +358,16 @@ describe('Task Management', () => {
       const pending = listTasks(paths, { status: 'pending' });
       expect(pending.length).toBe(1);
     });
+
+    it('filters by project', () => {
+      createTask(paths, 'paul', 'acme', 'Dashboard task', { project: 'dashboard' });
+      createTask(paths, 'paul', 'acme', 'Bus task', { project: 'bus' });
+      createTask(paths, 'paul', 'acme', 'No project task');
+
+      const dashboardTasks = listTasks(paths, { project: 'dashboard' });
+      expect(dashboardTasks.length).toBe(1);
+      expect(dashboardTasks[0].title).toBe('Dashboard task');
+    });
   });
 });
 

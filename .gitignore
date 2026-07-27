@@ -70,6 +70,7 @@ KNOWN-ISSUES.md
 WINDOWS-IMPLEMENTATION-PLAN.md
 WINDOWS-SUPPORT-INVESTIGATION.md
 BRAINDUMP*.md
+SESSION-RECAP*.md
 AGENTS.md
 # But AGENTS.md inside templates/ is a static template file that must ship.
 !templates/**/AGENTS.md
