@@ -59,6 +59,7 @@ const SPINNER_ONLY_RE = /^[\s⠀-⣿|/\\\-◐-◓◰-◳✢✳✶✻✽·•*+�
 const SPINNER_STATUS_RE = /^[⠀-⣿◐-◓◰-◳✢✳✶✻✽·◯○●◦]\s*/u;
 const STATUS_SHAPED_PREFIX_RE = /^[⠀-⣿|/\\\-◐-◓◰-◳✢✳✶✻✽·•*+◯○●◦]/u;
 const MAX_MEANINGFUL_STDOUT_DELTA_BYTES = 256 * 1024;
+const EVENT_LOG_TAIL_MAX_BYTES = 256 * 1024;
 
 export function meaningfulPrintableLines(chunk: string): string[] {
   return chunk
@@ -768,16 +769,31 @@ export class FastChecker {
       return; // nothing new
     }
 
+    // Bound the read the same way the stdout watchdog reads are bounded
+    // (see 32446ba): if the unread delta has grown past the cap — position
+    // stalled, or a burst of events landed since the last 500ms tick — skip
+    // the stale middle and read only the trailing window instead of
+    // re-reading an ever-larger delta on the daemon's single shared event
+    // loop. Best-effort telemetry: losing the skipped events is acceptable,
+    // blocking the daemon is not.
+    const fullDelta = stats.size - this.eventLogPosition;
+    const toRead = Math.min(fullDelta, EVENT_LOG_TAIL_MAX_BYTES);
+    const readStart = fullDelta > EVENT_LOG_TAIL_MAX_BYTES
+      ? stats.size - toRead
+      : this.eventLogPosition;
+    if (fullDelta > EVENT_LOG_TAIL_MAX_BYTES) {
+      this.log(`WATCHDOG: event-log delta ${fullDelta}B exceeds cap; skipping ahead and sampling tail`);
+    }
+
     const fd = openSync(this.eventLogCurrentPath, 'r');
     try {
-      const toRead = stats.size - this.eventLogPosition;
       const buf = Buffer.alloc(toRead);
       // Honour readSync's return value — file can shrink between statSync and
       // readSync (rotation race). Advance position by ACTUAL bytes read so a
       // short read doesn't silently skip past unread data on the next tick.
-      const bytesRead = readSync(fd, buf, 0, toRead, this.eventLogPosition);
+      const bytesRead = readSync(fd, buf, 0, toRead, readStart);
       if (bytesRead <= 0) return;
-      this.eventLogPosition += bytesRead;
+      this.eventLogPosition = readStart + bytesRead;
       const text = buf.subarray(0, bytesRead).toString('utf-8');
       for (const line of text.split('\n')) {
         const trimmed = line.trim();
