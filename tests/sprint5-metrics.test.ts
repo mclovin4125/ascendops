@@ -347,7 +347,12 @@ describe('Sprint 5: Observability & Metrics', () => {
       expect(commands.length).toBe(0);
     });
 
-    it('truncates description to 256 chars', () => {
+    it('truncates description to 80 chars', () => {
+      // Telegram's documented per-description max is 256 chars and the documented
+      // command-count max is 100, but setMyCommands also enforces an undocumented
+      // total-payload size cap (~6.2-6.3KB observed) that a 256-char truncation
+      // doesn't protect against — an agent with 20+ skills can trip
+      // BOT_COMMANDS_TOO_MUCH well under 100 commands. See src/bus/metrics.ts.
       const scanDir = join(testDir, 'agent5');
       const skillDir = join(scanDir, 'skills', 'verbose');
       mkdirSync(skillDir, { recursive: true });
@@ -355,7 +360,7 @@ describe('Sprint 5: Observability & Metrics', () => {
       writeFileSync(join(skillDir, 'SKILL.md'), `---\nname: verbose\ndescription: ${longDesc}\n---\n`, 'utf-8');
 
       const commands = collectTelegramCommands([scanDir]);
-      expect(commands[0].description.length).toBe(256);
+      expect(commands[0].description.length).toBe(80);
     });
 
     // Issue #329: codex-runtime agents store slash commands under .codex/, not
