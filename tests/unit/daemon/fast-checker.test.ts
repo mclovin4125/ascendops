@@ -1966,7 +1966,15 @@ describe('FastChecker', () => {
         expect(secondAgent.hardRestartSelf).not.toHaveBeenCalled();
         expect(secondTelegram.sendMessage).not.toHaveBeenCalled();
 
-        writeFileSync(stdoutPath, `${firstSurvey}\nnew output\nHow is Claude doing this session?`, 'utf-8');
+        // Real Claude Code renders this prompt with a leading "●" status-dot
+        // (see 2026-07-28 investigation, task_1785239286787_99098435) — that
+        // marker makes the line "status-shaped" and excludes it from
+        // trackMeaningfulOutput's meaningful-line filter, same as any other
+        // spinner/status line. No unrelated real output is injected here, so
+        // lastMeaningfulOutputAt stays at its untouched default (0 = "stale")
+        // and the new occurrence still fires, per the surviving "genuinely
+        // stalled" branch of Signal 1.
+        writeFileSync(stdoutPath, `${firstSurvey}\n●How is Claude doing this session?`, 'utf-8');
         secondChecker.watchdogCheck();
 
         expect(secondAgent.hardRestartSelf).toHaveBeenCalledTimes(1);
@@ -1974,6 +1982,50 @@ describe('FastChecker', () => {
       } finally {
         nowSpy.mockRestore();
       }
+    });
+
+    it('suppresses the survey-prompt restart when real output is still active (false-positive fix, 2026-07-28)', () => {
+      const stdoutPath = join(paths.logDir, 'stdout.log');
+      const survey = 'How is Claude doing this session?';
+      const agent = makeAgentWithDir(join(testDir, 'agent-survey-active'));
+      const checker = new FastChecker(agent, paths, '/framework') as any;
+      checker.bootstrappedAt = Date.now() - checker.BOOTSTRAP_GRACE_MS - 1;
+
+      // Prime the meaningful-output baseline first: trackMeaningfulOutput
+      // treats a fresh checker's very first read as its baseline offset (not
+      // "new" output), so a single-call test can never observe foundNetNew —
+      // that's true of every real session too, which has already run many
+      // poll cycles by the time a survey shows up. Establish the baseline
+      // with an initial line before the survey appears.
+      writeFileSync(stdoutPath, 'startup output', 'utf-8');
+      checker.watchdogCheck();
+      expect(agent.hardRestartSelf).not.toHaveBeenCalled();
+
+      // Genuine new output (not spinner/status-shaped) alongside the survey —
+      // this is the confirmed real-world shape: the survey is a benign,
+      // periodic, non-blocking prompt that appears while the session keeps
+      // producing real work. It must NOT trigger a restart.
+      writeFileSync(stdoutPath, `startup output\n${survey}\nReal tool output line`, 'utf-8');
+      checker.watchdogCheck();
+
+      expect(agent.hardRestartSelf).not.toHaveBeenCalled();
+    });
+
+    it('still hard-restarts on the survey prompt when output has genuinely stalled', () => {
+      const stdoutPath = join(paths.logDir, 'stdout.log');
+      const survey = 'How is Claude doing this session?';
+      const agent = makeAgentWithDir(join(testDir, 'agent-survey-stalled'));
+      const checker = new FastChecker(agent, paths, '/framework') as any;
+      checker.bootstrappedAt = Date.now() - checker.BOOTSTRAP_GRACE_MS - 1;
+      // Simulate a session that produced real output long ago (well past the
+      // grace window) and has been silent since — the survey here really is
+      // corroborating evidence of a stuck session, not a benign false positive.
+      checker.lastMeaningfulOutputAt = Date.now() - 11 * 60 * 1000;
+
+      writeFileSync(stdoutPath, survey, 'utf-8');
+      checker.watchdogCheck();
+
+      expect(agent.hardRestartSelf).toHaveBeenCalledTimes(1);
     });
 
     it('detects a new survey even when more than 20KB of output follows it', () => {

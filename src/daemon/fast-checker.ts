@@ -1013,9 +1013,30 @@ export class FastChecker {
         }
       } catch { /* non-critical */ }
       if (surveyTail && /How is Claude doing this session\?/.test(surveyTail)) {
-        this.log('WATCHDOG: ctx-exhaustion survey prompt detected — hard-restarting');
-        this.triggerHardRestart('ctx exhaustion: session survey prompt in stdout', size);
-        return;
+        // 2026-07-28 investigation (task_1785239286787_99098435): the "is the
+        // agent cooked" premise below is wrong. Confirmed via 3 real
+        // occurrences' raw stdout that this survey is a benign, periodic,
+        // dismissible CLI feedback prompt — NOT tied to actual context
+        // exhaustion (one hit fired at 42% context, nowhere near the 60%
+        // handoff threshold) and NOT blocking (agents kept processing new
+        // messages and producing real output right around it). Restarting
+        // unconditionally on its mere appearance was killing healthy,
+        // actively-working sessions — all 10 fleet-wide occurrences since
+        // 2026-07-20 hit exactly this false-positive shape. Require the
+        // survey to be corroborated by genuinely stalled output (no new
+        // meaningful stdout in the grace window) before treating it as real
+        // evidence the session is stuck — same bar Signal 2/turn-watchdog
+        // already use for "is this session actually frozen," just checked
+        // fast here instead of waiting the full 30min.
+        const SURVEY_GRACE_MS = 10 * 60 * 1000;
+        const meaningfulOutputStale =
+          this.lastMeaningfulOutputAt === 0 || now - this.lastMeaningfulOutputAt >= SURVEY_GRACE_MS;
+        if (meaningfulOutputStale) {
+          this.log('WATCHDOG: ctx-exhaustion survey prompt detected with no recent meaningful output — hard-restarting');
+          this.triggerHardRestart('ctx exhaustion: session survey prompt in stdout with stalled output', size);
+          return;
+        }
+        this.log('WATCHDOG: session-survey prompt detected but output is active — treating as benign, not restarting');
       }
     }
 
