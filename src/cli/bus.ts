@@ -15,7 +15,7 @@ import { queryCap } from '../bus/query-cap.js';
 import { selfRestart, hardRestart, autoCommit, checkGoalStaleness, postActivity } from '../bus/system.js';
 import { createExperiment, runExperiment, evaluateExperiment, listExperiments, gatherContext, manageCycle, loadExperimentConfig } from '../bus/experiment.js';
 import { browseCatalog, installCommunityItem, prepareSubmission, submitCommunityItem } from '../bus/catalog.js';
-import { collectMetrics, parseUsageOutput, storeUsageData, checkUpstream, collectTelegramCommands, registerTelegramCommands } from '../bus/metrics.js';
+import { collectMetrics, parseUsageOutput, storeUsageData, checkUpstream, findStrandedBranches, collectTelegramCommands, registerTelegramCommands } from '../bus/metrics.js';
 import { createApproval, updateApproval } from '../bus/approval.js';
 import { listActiveThreads, addActiveThread, updateActiveThread, removeActiveThread, clearActiveThreads } from '../bus/active-threads.js';
 import { listVendorDocPatterns, vendorDocPattern } from '../bus/vendor-patterns.js';
@@ -1326,6 +1326,17 @@ busCommand
     const env = resolveEnv();
     const frameworkRoot = env.frameworkRoot || env.projectRoot || process.cwd();
     const result = checkUpstream(frameworkRoot, { apply: opts.apply });
+    emitResult(result);
+  });
+
+busCommand
+  .command('check-stranded-branches')
+  .description('Find local branches with commits not on main (completed work invisible to tracking until merged)')
+  .option('--base <branch>', 'Base branch to compare against', 'main')
+  .action((opts: { base?: string }) => {
+    const env = resolveEnv();
+    const frameworkRoot = env.frameworkRoot || env.projectRoot || process.cwd();
+    const result = findStrandedBranches(frameworkRoot, { baseBranch: opts.base });
     emitResult(result);
   });
 

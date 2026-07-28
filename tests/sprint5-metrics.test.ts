@@ -10,6 +10,7 @@ import {
   collectTelegramCommands,
   registerTelegramCommands,
   checkUpstream,
+  findStrandedBranches,
 } from '../src/bus/metrics.js';
 
 describe('Sprint 5: Observability & Metrics', () => {
@@ -566,5 +567,109 @@ describe('checkUpstream', () => {
     const result = checkUpstream(localDir);
     expect(result.status).toBe('up_to_date');
     expect(result.commits ?? 0).toBe(0);
+  });
+});
+
+describe('findStrandedBranches', () => {
+  let repoDir: string;
+
+  function git(cwd: string, cmd: string): string {
+    return execSync(`git ${cmd}`, { cwd, encoding: 'utf-8' });
+  }
+
+  beforeEach(() => {
+    repoDir = mkdtempSync(join(tmpdir(), 'cortextos-stranded-'));
+    git(repoDir, 'init -q -b main');
+    git(repoDir, 'config user.email "t@test.com"');
+    git(repoDir, 'config user.name "Tester"');
+    writeFileSync(join(repoDir, 'base.txt'), 'v1\n');
+    git(repoDir, 'add base.txt');
+    git(repoDir, 'commit -q -m "init"');
+  });
+
+  afterEach(() => {
+    rmSync(repoDir, { recursive: true, force: true });
+  });
+
+  it('flags a branch with commits not on main', () => {
+    git(repoDir, 'checkout -q -b feat/stray');
+    writeFileSync(join(repoDir, 'stray.txt'), 'stray\n');
+    git(repoDir, 'add stray.txt');
+    git(repoDir, 'commit -q -m "stray work"');
+    git(repoDir, 'checkout -q main');
+
+    const result = findStrandedBranches(repoDir);
+    expect(result.status).toBe('ok');
+    const names = (result.branches ?? []).map((b) => b.branch);
+    expect(names).toContain('feat/stray');
+    const stray = result.branches?.find((b) => b.branch === 'feat/stray');
+    expect(stray?.ahead_count).toBe(1);
+    expect(stray?.last_commit_subject).toBe('stray work');
+  });
+
+  it('does not flag a branch with no commits ahead of main', () => {
+    git(repoDir, 'checkout -q -b feat/even-with-main');
+    git(repoDir, 'checkout -q main');
+
+    const result = findStrandedBranches(repoDir);
+    const names = (result.branches ?? []).map((b) => b.branch);
+    expect(names).not.toContain('feat/even-with-main');
+  });
+
+  it('never includes the base branch itself', () => {
+    const result = findStrandedBranches(repoDir);
+    const names = (result.branches ?? []).map((b) => b.branch);
+    expect(names).not.toContain('main');
+  });
+
+  it('supports a custom base branch', () => {
+    git(repoDir, 'checkout -q -b develop');
+    writeFileSync(join(repoDir, 'dev.txt'), 'dev\n');
+    git(repoDir, 'add dev.txt');
+    git(repoDir, 'commit -q -m "on develop"');
+
+    git(repoDir, 'checkout -q -b feat/ahead-of-develop');
+    writeFileSync(join(repoDir, 'ahead.txt'), 'ahead\n');
+    git(repoDir, 'add ahead.txt');
+    git(repoDir, 'commit -q -m "ahead of develop"');
+    git(repoDir, 'checkout -q develop');
+
+    const result = findStrandedBranches(repoDir, { baseBranch: 'develop' });
+    expect(result.base).toBe('develop');
+    const names = (result.branches ?? []).map((b) => b.branch);
+    expect(names).toContain('feat/ahead-of-develop');
+    expect(names).not.toContain('main'); // ahead of develop too, but excluded as an unrelated branch check target
+  });
+
+  it('handles a branch name containing shell-special characters safely (no shell interpolation)', () => {
+    // Git ref names permit several shell-special characters (e.g. `$`, `(`).
+    // A vulnerable implementation that shell-interpolates the branch name
+    // into an execSync command string would let a crafted branch name run
+    // arbitrary commands; execFileSync with argv arrays does not.
+    // Single-quoted here because this test helper itself shell-interpolates
+    // (execSync(`git ${cmd}`)) - double quotes would NOT stop the test's own
+    // shell from expanding $(...) before git ever sees the string. The
+    // production code under test never does this (execFileSync argv array).
+    const trickyName = 'feat/weird-$(name)';
+    git(repoDir, `checkout -q -b '${trickyName}'`);
+    writeFileSync(join(repoDir, 'weird.txt'), 'weird\n');
+    git(repoDir, 'add weird.txt');
+    git(repoDir, 'commit -q -m "weird branch name"');
+    git(repoDir, 'checkout -q main');
+
+    const result = findStrandedBranches(repoDir);
+    expect(result.status).toBe('ok');
+    const names = (result.branches ?? []).map((b) => b.branch);
+    expect(names).toContain(trickyName);
+  });
+
+  it('errors cleanly on a non-git directory', () => {
+    const notARepo = mkdtempSync(join(tmpdir(), 'cortextos-not-a-repo-'));
+    try {
+      const result = findStrandedBranches(notARepo);
+      expect(result.status).toBe('error');
+    } finally {
+      rmSync(notARepo, { recursive: true, force: true });
+    }
   });
 });

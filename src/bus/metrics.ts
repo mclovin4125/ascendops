@@ -5,7 +5,7 @@
 
 import { existsSync, readFileSync, writeFileSync, appendFileSync, readdirSync, mkdirSync } from 'fs';
 import { join, basename, dirname } from 'path';
-import { execSync } from 'child_process';
+import { execSync, execFileSync } from 'child_process';
 import { ensureDir } from '../utils/atomic.js';
 import { isStatusStringStale } from './heartbeat.js';
 
@@ -71,6 +71,22 @@ export interface RegisterCommandsResult {
   status: string;
   count: number;
   commands: { command: string; description: string }[];
+  error?: string;
+}
+
+export interface StrandedBranch {
+  branch: string;
+  /** Commits on this branch not on the base branch. */
+  ahead_count: number;
+  /** ISO 8601 commit date of the branch's most recent commit. */
+  last_commit_at: string;
+  last_commit_subject: string;
+}
+
+export interface StrandedBranchesResult {
+  status: string;
+  base?: string;
+  branches?: StrandedBranch[];
   error?: string;
 }
 
@@ -480,6 +496,95 @@ export function checkUpstream(
     changes,
     ...(catalog_additions.length > 0 ? { catalog_additions } : {}),
   };
+}
+
+// --- findStrandedBranches ---
+
+/**
+ * Automates the manual `git branch --all` sweep for stray local branches
+ * carrying commits the base branch doesn't have (default: main). Completed,
+ * unmerged work on a branch is invisible to task/approval tracking until
+ * someone checks by hand - confirmed twice (2026-07-26
+ * restore-list-tasks-project-filter, 2026-07-27 feat/rentvine-api-client)
+ * before a routine rebuild from main silently stranded it. This surfaces
+ * every such branch instead of relying on catching it manually.
+ *
+ * Branch names come from git itself, not free-form user input, but are still
+ * passed as execFileSync argv elements (never shell-interpolated) since git
+ * ref names permit several shell-special characters (`$`, `(`, etc.).
+ *
+ * A branch unreadable by rev-list/log (corrupt ref, race with a concurrent
+ * git operation) is skipped rather than failing the whole sweep.
+ */
+export function findStrandedBranches(
+  frameworkRoot: string,
+  options: { baseBranch?: string } = {},
+): StrandedBranchesResult {
+  const execOpts = { cwd: frameworkRoot, encoding: 'utf-8' as const, timeout: 30000 };
+  const base = options.baseBranch ?? 'main';
+
+  try {
+    execFileSync('git', ['rev-parse', '--is-inside-work-tree'], { ...execOpts, stdio: 'pipe' });
+  } catch {
+    return { status: 'error', error: 'not a git repository' };
+  }
+
+  let branchNames: string[];
+  try {
+    const raw = execFileSync(
+      'git',
+      ['for-each-ref', '--format=%(refname:short)', 'refs/heads/'],
+      { ...execOpts, stdio: 'pipe' },
+    );
+    branchNames = raw.trim().split('\n').filter(Boolean).filter((b) => b !== base);
+  } catch {
+    return { status: 'error', error: 'failed to list local branches' };
+  }
+
+  const branches: StrandedBranch[] = [];
+  for (const branch of branchNames) {
+    let aheadCount = 0;
+    try {
+      const count = execFileSync(
+        'git',
+        ['rev-list', `${base}..${branch}`, '--count'],
+        { ...execOpts, stdio: 'pipe' },
+      ).trim();
+      aheadCount = parseInt(count, 10);
+    } catch {
+      continue; // unreadable ref — skip rather than fail the whole sweep
+    }
+    if (!aheadCount) continue;
+
+    let lastCommitAt = '';
+    let lastCommitSubject = '';
+    try {
+      // \x1f (unit separator) delimits fields — never appears in a commit
+      // subject, unlike a plain space or pipe.
+      const raw = execFileSync(
+        'git',
+        ['log', '-1', '--format=%cI%x1f%s', branch],
+        { ...execOpts, stdio: 'pipe' },
+      ).trim();
+      const sepIndex = raw.indexOf('\x1f');
+      if (sepIndex !== -1) {
+        lastCommitAt = raw.slice(0, sepIndex);
+        lastCommitSubject = raw.slice(sepIndex + 1);
+      }
+    } catch { /* leave blank — ahead_count alone still flags the branch */ }
+
+    branches.push({
+      branch,
+      ahead_count: aheadCount,
+      last_commit_at: lastCommitAt,
+      last_commit_subject: lastCommitSubject,
+    });
+  }
+
+  // Newest-unmerged-work first: the most actionable branches surface at the top.
+  branches.sort((a, b) => (a.last_commit_at < b.last_commit_at ? 1 : -1));
+
+  return { status: 'ok', base, branches };
 }
 
 // --- registerTelegramCommands ---
