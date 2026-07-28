@@ -87,6 +87,41 @@ describe('Sprint 5: Observability & Metrics', () => {
       expect(report.system.agents_healthy).toBe(0);
     });
 
+    it('flags status_stale when the status string has been unchanged for 12h+, even with a fresh last_heartbeat', () => {
+      writeFileSync(join(ctxRoot, 'config', 'enabled-agents.json'), JSON.stringify({ bot1: { enabled: true } }), 'utf-8');
+      const stateDir = join(ctxRoot, 'state', 'bot1');
+      mkdirSync(stateDir, { recursive: true });
+
+      // last_heartbeat is fresh (agent IS heartbeating on schedule), but the
+      // status string has been the same since 13h ago - past the threshold.
+      writeFileSync(join(stateDir, 'heartbeat.json'), JSON.stringify({
+        status: 'watching for approvals',
+        last_heartbeat: new Date().toISOString(),
+        status_since: new Date(Date.now() - 13 * 60 * 60 * 1000).toISOString(),
+        status_repeat_count: 4,
+      }), 'utf-8');
+
+      const report = collectMetrics(ctxRoot);
+      expect(report.agents.bot1.heartbeat_stale).toBe(false);
+      expect(report.agents.bot1.status_stale).toBe(true);
+    });
+
+    it('does not flag status_stale when the status changed recently', () => {
+      writeFileSync(join(ctxRoot, 'config', 'enabled-agents.json'), JSON.stringify({ bot1: { enabled: true } }), 'utf-8');
+      const stateDir = join(ctxRoot, 'state', 'bot1');
+      mkdirSync(stateDir, { recursive: true });
+
+      writeFileSync(join(stateDir, 'heartbeat.json'), JSON.stringify({
+        status: 'merging approved fix',
+        last_heartbeat: new Date().toISOString(),
+        status_since: new Date().toISOString(),
+        status_repeat_count: 1,
+      }), 'utf-8');
+
+      const report = collectMetrics(ctxRoot);
+      expect(report.agents.bot1.status_stale).toBe(false);
+    });
+
     it('counts pending approvals', () => {
       writeFileSync(join(ctxRoot, 'config', 'enabled-agents.json'), '{}', 'utf-8');
       writeFileSync(join(ctxRoot, 'approvals', 'pending', 'ap1.json'), '{}', 'utf-8');
