@@ -517,4 +517,19 @@ describe('checkUpstream', () => {
     expect(allChanged).not.toContain('shared.txt');
     expect(allChanged).toContain('new-feature.txt');
   });
+
+  it('reports up_to_date when SHAs differ but upstream has landed no new commits', () => {
+    // Local already absorbed upstream's tip (it's an ancestor of HEAD) and
+    // then advanced further with a local-only commit. HEAD and
+    // upstream/main diverge in SHA, but upstream is not actually ahead.
+    git(localDir, 'fetch -q upstream');
+    git(localDir, 'merge -q upstream/main --no-edit');
+    writeFileSync(join(localDir, 'local-only.txt'), 'local\n');
+    git(localDir, 'add local-only.txt');
+    git(localDir, 'commit -q -m "local-only follow-up commit"');
+
+    const result = checkUpstream(localDir);
+    expect(result.status).toBe('up_to_date');
+    expect(result.commits ?? 0).toBe(0);
+  });
 });

@@ -362,6 +362,15 @@ export function checkUpstream(
     commitCount = parseInt(execSync('git rev-list HEAD..upstream/main --count', { ...execOpts, stdio: 'pipe' }).trim(), 10);
   } catch { /* default 0 */ }
 
+  // HEAD and upstream/main can differ in SHA while upstream has landed no
+  // commits we don't already have (e.g. we've advanced locally past
+  // upstream, or absorbed the same content under different commit hashes
+  // via cherry-pick/rebase). commitCount is the true "is upstream ahead"
+  // signal; a bare SHA mismatch above is not.
+  if (commitCount === 0) {
+    return { status: 'up_to_date', message: 'No upstream changes available' };
+  }
+
   // Three-dot range: unlike `git log`/`git rev-list`, `git diff A..B` is just
   // an alias for `git diff A B` (a direct tree comparison), NOT a range
   // exclusion. That made every locally-modified file show up as "upstream
