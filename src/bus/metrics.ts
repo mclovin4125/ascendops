@@ -7,6 +7,7 @@ import { existsSync, readFileSync, writeFileSync, appendFileSync, readdirSync, m
 import { join, basename, dirname } from 'path';
 import { execSync } from 'child_process';
 import { ensureDir } from '../utils/atomic.js';
+import { isStatusStringStale } from './heartbeat.js';
 
 // --- Types ---
 
@@ -16,6 +17,7 @@ export interface AgentMetrics {
   tasks_in_progress: number;
   errors_today: number;
   heartbeat_stale: boolean;
+  status_stale: boolean;
 }
 
 export interface SystemMetrics {
@@ -179,6 +181,7 @@ export function collectMetrics(ctxRoot: string, org?: string): MetricsReport {
 
     // Check heartbeat staleness (stale if >5 hours old)
     let heartbeatStale = true;
+    let statusStale = false;
     const hbFile = join(ctxRoot, 'state', agent, 'heartbeat.json');
     if (existsSync(hbFile)) {
       try {
@@ -191,6 +194,7 @@ export function collectMetrics(ctxRoot: string, org?: string): MetricsReport {
             agentsHealthy++;
           }
         }
+        statusStale = isStatusStringStale(hb);
       } catch { /* stale by default */ }
     }
 
@@ -200,6 +204,7 @@ export function collectMetrics(ctxRoot: string, org?: string): MetricsReport {
       tasks_in_progress: inProgress,
       errors_today: errorsToday,
       heartbeat_stale: heartbeatStale,
+      status_stale: statusStale,
     };
   }
 

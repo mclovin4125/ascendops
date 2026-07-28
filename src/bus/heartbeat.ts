@@ -75,6 +75,20 @@ export function updateHeartbeat(
   const ts = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
   const mode = options?.timezone ? detectDayNightMode(options.timezone) : detectDayNightMode('UTC');
 
+  // Carry forward status-string staleness tracking from the prior heartbeat
+  // (if any and readable). A malformed/missing prior file is treated as "no
+  // history" rather than an error — this must never block a heartbeat write.
+  let statusSince = ts;
+  let statusRepeatCount = 1;
+  try {
+    const prevRaw = readFileSync(join(paths.stateDir, 'heartbeat.json'), 'utf-8');
+    const prev = JSON.parse(prevRaw) as Partial<Heartbeat>;
+    if (prev.status === status) {
+      statusSince = prev.status_since ?? prev.last_heartbeat ?? ts;
+      statusRepeatCount = (prev.status_repeat_count ?? 1) + 1;
+    }
+  } catch { /* no prior heartbeat, or unreadable — start fresh */ }
+
   const heartbeat: Heartbeat = {
     agent: agentName,
     org: options?.org ?? '',
@@ -84,6 +98,8 @@ export function updateHeartbeat(
     mode,
     last_heartbeat: ts,
     loop_interval: options?.loopInterval ?? '',
+    status_since: statusSince,
+    status_repeat_count: statusRepeatCount,
   };
 
   // Take the per-agent stateDir lock — the SAME lock the logEvent heartbeat
@@ -104,6 +120,29 @@ export function updateHeartbeat(
   // cleared on a later heartbeat. This is the primary marker cleanup; the
   // hook's TTL is the failed-start backstop.
   clearEndMarkers(paths.stateDir);
+}
+
+/** Default: flag a status string unchanged for 12h+ (3 cycles at the default 4h heartbeat interval). */
+export const DEFAULT_STATUS_STALE_MS = 12 * 60 * 60 * 1000;
+
+/**
+ * True when the heartbeat's CURRENT status string has been unchanged for at
+ * least thresholdMs. Distinct from last_heartbeat staleness: an agent can be
+ * heartbeating exactly on schedule (fresh last_heartbeat) while reporting the
+ * same status string cycle after cycle, which is the failure mode this
+ * catches — "alive" on the dashboard but not actually reporting anything new.
+ * Missing status_since (older heartbeat.json predating this field) reads as
+ * not-stale rather than throwing or defaulting to stale.
+ */
+export function isStatusStringStale(
+  hb: Pick<Heartbeat, 'status_since'>,
+  thresholdMs: number = DEFAULT_STATUS_STALE_MS,
+  nowMs: number = Date.now(),
+): boolean {
+  if (!hb.status_since) return false;
+  const since = new Date(hb.status_since).getTime();
+  if (Number.isNaN(since)) return false;
+  return nowMs - since >= thresholdMs;
 }
 
 /**

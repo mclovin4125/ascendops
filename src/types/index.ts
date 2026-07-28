@@ -113,6 +113,14 @@ export interface Heartbeat {
   loop_interval: string;
   // Legacy field — sync.ts falls back to this if last_heartbeat absent
   timestamp?: string;
+  // Status-string staleness tracking (see isStatusStringStale in heartbeat.ts):
+  // last_heartbeat proves the agent is heartbeating on schedule, but the same
+  // status string repeated for many cycles can mean it isn't reporting
+  // anything new. status_since is when the CURRENT status string first
+  // appeared; status_repeat_count is how many consecutive updateHeartbeat
+  // calls kept it unchanged.
+  status_since?: string; // ISO 8601
+  status_repeat_count?: number;
 }
 
 // Approval Types
