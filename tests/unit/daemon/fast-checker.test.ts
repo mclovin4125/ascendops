@@ -2320,7 +2320,7 @@ describe('FastChecker', () => {
         write: vi.fn(),
         getAgentDir: () => testDir,
         getConfig: () => config,
-        getOutputBuffer: () => ({ getRecent: () => '' }),
+        getOutputBuffer: () => ({ getRecent: () => '', getRecentTail: () => '' }),
         sessionRefresh: vi.fn().mockResolvedValue(undefined),
       } as any;
     }
@@ -2475,7 +2475,7 @@ describe('Signal-3 suppression when context handoff is in flight (§5d)', () => 
         write: vi.fn(),
         getAgentDir: () => td,
         getConfig: () => ({}),
-        getOutputBuffer: () => ({ getRecent: () => '' }),
+        getOutputBuffer: () => ({ getRecent: () => '', getRecentTail: () => '' }),
         sessionRefresh: vi.fn().mockResolvedValue(undefined),
       };
       return new FastChecker(agent, p, '/tmp/framework');
@@ -2514,7 +2514,7 @@ describe('Signal-3 suppression when context handoff is in flight (§5d)', () => 
         write: vi.fn(),
         getAgentDir: () => td,
         getConfig: () => ({}),
-        getOutputBuffer: () => ({ getRecent: () => '' }),
+        getOutputBuffer: () => ({ getRecent: () => '', getRecentTail: () => '' }),
         sessionRefresh: vi.fn().mockResolvedValue(undefined),
       };
       const checker = new FastChecker(agent, p, '/tmp/framework');

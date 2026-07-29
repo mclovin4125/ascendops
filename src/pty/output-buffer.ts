@@ -245,9 +245,32 @@ export class OutputBuffer {
 
   /**
    * Get a bounded tail of recent output for prompt detection.
+   *
+   * Walks the chunk array backward accumulating length only until maxBytes
+   * is covered, then joins just that trailing slice — NOT the full buffer.
+   * getRecent() ignores its `n` argument's intended unit (it counts CHUNKS,
+   * not bytes) and joins the whole ring buffer regardless; a caller passing
+   * a byte-sized number there (e.g. 8000) silently got the entire buffer
+   * every time once the ring filled past that many chunks. For a long-running
+   * session with a full 1000-chunk buffer, that meant re-joining and
+   * regex-scanning the ENTIRE buffered output on every single poll-cycle
+   * tick — cost that grows with total session output and, since the daemon
+   * runs every agent's checker on one shared Node event loop, stalls the
+   * whole fleet, not just the offending agent (see fast-checker.ts
+   * checkContextStatus, the only caller that ever passed a size to
+   * getRecent()). This method is the actual bounded-cost primitive callers
+   * reaching for "recent bytes" should use.
    */
   getRecentTail(maxBytes = 4096): string {
-    return this.getRecent().slice(-maxBytes);
+    const tail = this.getSafePendingTail();
+    let total = tail.length;
+    let startIdx = this.chunks.length;
+    for (let i = this.chunks.length - 1; i >= 0 && total < maxBytes; i--) {
+      total += this.chunks[i].length;
+      startIdx = i;
+    }
+    const joined = this.chunks.slice(startIdx).join('') + tail;
+    return joined.length > maxBytes ? joined.slice(-maxBytes) : joined;
   }
 
   /** Mark the current push generation without copying output into another buffer. */

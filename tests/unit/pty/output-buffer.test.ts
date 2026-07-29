@@ -342,3 +342,51 @@ describe('OutputBuffer.close() — held-tail flush at PTY exit (P3 regression)',
     expect(buf.getSize()).toBe('ends with [REDACTED_POSSIBLE_JWT_TAIL]'.length);
   });
 });
+
+describe('OutputBuffer.getRecentTail bounded-cost read', () => {
+  // 2026-07-29 (task_1785296973718_84792376): getRecentTail used to call
+  // getRecent() with no arguments (join every buffered chunk) and slice the
+  // result — same O(total buffer) cost as the getRecent(8000) call site it
+  // was meant to replace, just with a correct final substring. These tests
+  // pin the actual bound: only enough trailing chunks may be joined to cover
+  // maxBytes, not the whole ring buffer.
+  it('returns only the trailing maxBytes even when the buffer holds far more', () => {
+    const buf = new OutputBuffer(1000, '/tmp/fake-stdout.log');
+    for (let i = 0; i < 500; i++) {
+      buf.push(`chunk-${String(i).padStart(4, '0')}-`); // 10 bytes each, 5000 bytes total
+    }
+    const tail = buf.getRecentTail(50);
+    expect(tail.length).toBeLessThanOrEqual(50);
+    expect(tail).toContain('chunk-0499-');
+    expect(tail).not.toContain('chunk-0000-');
+  });
+
+  it('only joins as many trailing chunks as needed to cover maxBytes', () => {
+    const buf = new OutputBuffer(1000);
+    const joinSpy = vi.spyOn(Array.prototype, 'join');
+    for (let i = 0; i < 500; i++) {
+      buf.push('x'.repeat(20)); // 20 bytes/chunk, 10000 bytes total
+    }
+    joinSpy.mockClear();
+    buf.getRecentTail(100); // needs ~5 trailing chunks, not all 500
+    const joinedLengths = joinSpy.mock.instances.map((arr) => (arr as string[]).length);
+    joinSpy.mockRestore();
+    expect(Math.max(...joinedLengths)).toBeLessThan(500);
+  });
+
+  it('matches the content getRecent(<huge count>) would have returned', () => {
+    const buf = new OutputBuffer(1000);
+    for (let i = 0; i < 50; i++) {
+      buf.push(`line-${i}\n`);
+    }
+    expect(buf.getRecentTail(4096)).toBe(buf.getRecent(8000).slice(-4096));
+  });
+
+  it('includes a held-back pending tail within the byte bound', () => {
+    const buf = new OutputBuffer(1000);
+    buf.push('x'.repeat(4000));
+    buf.push(FAKE_JWT.slice(0, 20)); // held back as a possible partial JWT
+    const tail = buf.getRecentTail(30);
+    expect(tail.length).toBeLessThanOrEqual(30);
+  });
+});

@@ -919,7 +919,7 @@ export class FastChecker {
     }
 
     // Watchdog: detect ctx-exhaustion survey + frozen stdout
-    this.watchdogCheck();
+    this.timeStep('watchdogCheck', () => this.watchdogCheck());
 
     // NOTE (F8): Gmail watch is intentionally NOT checked here — it runs on
     // its own timer (see start()) because its worst case exceeds the 30s
@@ -928,13 +928,41 @@ export class FastChecker {
     // local file reads) and moving Slack was explicitly out of scope.
 
     // Slack watch: check on configured interval (default 60 sec)
-    await this.checkSlackWatch();
+    await this.timeStepAsync('checkSlackWatch', () => this.checkSlackWatch());
 
     // Usage rate-limit guard: check every 15 min
-    await this.checkUsageTier();
+    await this.timeStepAsync('checkUsageTier', () => this.checkUsageTier());
 
     // Context monitor: check usage thresholds and fire warnings/handoffs
-    await this.checkContextStatus();
+    await this.timeStepAsync('checkContextStatus', () => this.checkContextStatus());
+  }
+
+  // 2026-07-29 (task_1785296973718_84792376): fleet-wide pollCycle-stall
+  // investigation — every prior stall (07-23 onward) was diagnosed after the
+  // fact from restarts.log durations + source-reading, never caught live
+  // mid-stall. These wrappers log any single pollCycle step over 1s so the
+  // NEXT occurrence names the actual slow step directly instead of restarting
+  // the same guess-from-the-diff cycle. Threshold is well under the 30s
+  // pollCycle timeout and far above every step's documented normal cost, so
+  // it should stay silent outside a real regression.
+  private static readonly SLOW_STEP_THRESHOLD_MS = 1000;
+
+  private timeStep(label: string, fn: () => void): void {
+    const start = Date.now();
+    fn();
+    const elapsed = Date.now() - start;
+    if (elapsed > FastChecker.SLOW_STEP_THRESHOLD_MS) {
+      this.log(`WATCHDOG: pollCycle step "${label}" took ${elapsed}ms (>${FastChecker.SLOW_STEP_THRESHOLD_MS}ms threshold)`);
+    }
+  }
+
+  private async timeStepAsync(label: string, fn: () => Promise<void>): Promise<void> {
+    const start = Date.now();
+    await fn();
+    const elapsed = Date.now() - start;
+    if (elapsed > FastChecker.SLOW_STEP_THRESHOLD_MS) {
+      this.log(`WATCHDOG: pollCycle step "${label}" took ${elapsed}ms (>${FastChecker.SLOW_STEP_THRESHOLD_MS}ms threshold)`);
+    }
   }
 
   /**
@@ -2651,7 +2679,7 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     // text in memory files, source, and chat that *document* this mechanism — without this guard
     // a fresh boot re-reading those at low context force-restarts on every boot, producing a loop.
     const ctxCorroboratesOverflow = exceeds200k || (pct !== null && pct >= 85);
-    const recentOutput = this.agent.getOutputBuffer()?.getRecent(8000) ?? '';
+    const recentOutput = this.agent.getOutputBuffer()?.getRecentTail(8000) ?? '';
     if (ctxCorroboratesOverflow && /extra usage.*?1[Mm] context|conversation too long.*?compaction/i.test(recentOutput)) {
       this.log('Context overflow error detected in PTY output at high context — force restarting');
       this.forceContextRestart('API overflow error in PTY output');

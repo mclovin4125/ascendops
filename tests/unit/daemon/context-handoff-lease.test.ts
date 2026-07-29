@@ -223,7 +223,7 @@ describe('context handoff fleet lease', () => {
       injectMessage,
       getConfig: () => ({}),
       getAgentDir: () => agentDir,
-      getOutputBuffer: () => ({ getRecent: () => '' }),
+      getOutputBuffer: () => ({ getRecent: () => '', getRecentTail: () => '' }),
       sessionRefresh: () => Promise.resolve(),
     } as any;
     const paths: BusPaths = {
