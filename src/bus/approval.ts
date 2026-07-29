@@ -281,6 +281,28 @@ export function updateApproval(
   }
 }
 
+/** Default: flag a pending approval unresolved for 4h+ (one heartbeat cycle at the default interval). */
+export const DEFAULT_APPROVAL_STALE_MS = 4 * 60 * 60 * 1000;
+
+/**
+ * True when a pending approval's created_at is at least thresholdMs old.
+ * Approvals block on a human decision indefinitely by design (no auto-expiry),
+ * so this is purely a visibility signal — surfaced via list-approvals --stale
+ * so an aging approval doesn't require someone to manually diff created_at
+ * against "now" (see MEMORY.md 2026-07-26: work stuck behind an unresolved
+ * approval is otherwise invisible until someone checks by hand). Mirrors
+ * isStatusStringStale's shape (heartbeat.ts) for consistency.
+ */
+export function isApprovalStale(
+  approval: Pick<Approval, 'created_at'>,
+  thresholdMs: number = DEFAULT_APPROVAL_STALE_MS,
+  nowMs: number = Date.now(),
+): boolean {
+  const created = new Date(approval.created_at).getTime();
+  if (Number.isNaN(created)) return false;
+  return nowMs - created >= thresholdMs;
+}
+
 /**
  * List pending approvals.
  */
