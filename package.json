@@ -8,6 +8,7 @@
     "ascendops": "dist/ascendops.js"
   },
   "scripts": {
+    "postinstall": "node scripts/fix-pty-spawn-helper.mjs",
     "prebuild": "node scripts/prebuild-guard.mjs && npm run typecheck",
     "build": "tsup",
     "predev": "node scripts/prebuild-guard.mjs",
