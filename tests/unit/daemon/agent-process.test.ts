@@ -718,14 +718,13 @@ describe('AgentProcess — CrashLoopPauser (instar-inspired sliding window)', ()
     expect(ap.getStatus().status).toBe('halted');
   });
 
-  it('does not trigger CRASH_LOOP when no crash_window is configured (backward compat)', async () => {
-    const ap = new AgentProcess('alice', mockEnv, {
-      max_crashes_per_day: 5,
-    });
-    await ap.start();
-
-    // 3 crashes — without crash_window, these are just normal crash recovery
-    for (let i = 0; i < 3; i++) {
+  // The window used to be opt-in, and no shipped template set it — so
+  // crashWindowMs was 0 for every real agent and this guard never ran. The only
+  // backstop was max_crashes_per_day (10) combined with a backoff that caps at
+  // 5 minutes, which respawned a broken agent every 5min for most of an hour,
+  // every day, including overnight. It is now default-ON.
+  async function crashNTimes(ap: any, n: number): Promise<void> {
+    for (let i = 0; i < n; i++) {
       capturedOnExit!(1, 0);
       if (ap.getStatus().status !== 'halted') {
         mockPty.spawn.mockClear();
@@ -734,8 +733,54 @@ describe('AgentProcess — CrashLoopPauser (instar-inspired sliding window)', ()
         await ap.start();
       }
     }
-    // Should be 'crashed' (recovering), NOT 'halted', because daily max is 5
+  }
+
+  it('applies the default window when crash_window is absent (default-ON)', async () => {
+    // No crash_window and a daily budget far from exhausted: the sliding window
+    // must still halt at DEFAULT_CRASH_WINDOW_MAX_CRASHES.
+    const ap = new AgentProcess('alice', mockEnv, { max_crashes_per_day: 10 });
+    await ap.start();
+
+    await crashNTimes(ap, 3);
+
+    expect(ap.getStatus().status).toBe('halted');
+  });
+
+  it('does not halt before the default window fills', async () => {
+    const ap = new AgentProcess('alice', mockEnv, { max_crashes_per_day: 10 });
+    await ap.start();
+
+    await crashNTimes(ap, 2);
+
+    // crashNTimes restarts after any non-halting crash, so the observable
+    // contract here is "still recovering", not a specific transient status.
     expect(ap.getStatus().status).not.toBe('halted');
+  });
+
+  it('an explicit crash_window.seconds of 0 opts out (daily counter only)', async () => {
+    const ap = new AgentProcess('alice', mockEnv, {
+      max_crashes_per_day: 5,
+      crash_window: { seconds: 0 },
+    });
+    await ap.start();
+
+    await crashNTimes(ap, 3);
+
+    // Daily max is 5, so 3 crashes are still ordinary recovery.
+    expect(ap.getStatus().status).not.toBe('halted');
+  });
+
+  it('an explicit crash_window still wins over the default', async () => {
+    const ap = new AgentProcess('alice', mockEnv, {
+      max_crashes_per_day: 10,
+      crash_window: { seconds: 60, max_crashes: 2 },
+    });
+    await ap.start();
+
+    await crashNTimes(ap, 2);
+
+    // Halts at 2, not the default 3.
+    expect(ap.getStatus().status).toBe('halted');
   });
 });
 

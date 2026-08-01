@@ -31,6 +31,24 @@ type LogFn = (msg: string) => void;
 type StartOptions = { partOfFleetStart?: boolean };
 
 /**
+ * Default sliding-window crash-loop guard, applied when `crash_window` is absent
+ * from config.json.
+ *
+ * Previously the window was opt-in and no shipped template set it, so
+ * `crashWindowMs` was 0 for every agent and the CrashLoopPauser never ran. The
+ * only backstop was the daily `max_crashes_per_day` counter (10) — and because
+ * the crash backoff caps at 5 minutes (see handleExit), a genuinely broken agent
+ * would respawn every 5 minutes for the better part of an hour before halting,
+ * every day, including overnight. 3 crashes in 30 minutes is a crash loop no
+ * matter how much daily budget remains.
+ *
+ * Opt out with an explicit `crash_window: { seconds: 0 }` to restore the
+ * daily-counter-only behaviour.
+ */
+export const DEFAULT_CRASH_WINDOW_SECONDS = 1800;
+export const DEFAULT_CRASH_WINDOW_MAX_CRASHES = 3;
+
+/**
  * Manages a single agent's lifecycle.
  * Replaces agent-wrapper.sh for one agent.
  */
@@ -107,9 +125,16 @@ export class AgentProcess {
     if (config.max_crashes_per_day !== undefined) {
       this.maxCrashesPerDay = config.max_crashes_per_day;
     }
-    if (config.crash_window?.seconds) {
-      this.crashWindowMs = config.crash_window.seconds * 1000;
-      this.crashWindowMax = config.crash_window.max_crashes ?? 3;
+    // Default-ON: an absent crash_window uses the constants above so every agent
+    // gets loop protection without a config edit. An explicit `seconds <= 0` (or
+    // a non-finite value) is the deliberate opt-out — daily counter only.
+    const crashWindow = config.crash_window ?? {
+      seconds: DEFAULT_CRASH_WINDOW_SECONDS,
+      max_crashes: DEFAULT_CRASH_WINDOW_MAX_CRASHES,
+    };
+    if (Number.isFinite(crashWindow.seconds) && crashWindow.seconds > 0) {
+      this.crashWindowMs = crashWindow.seconds * 1000;
+      this.crashWindowMax = crashWindow.max_crashes ?? DEFAULT_CRASH_WINDOW_MAX_CRASHES;
     }
     this.dedup = new MessageDedup();
     this.log = log || ((msg) => console.log(`[${name}] ${msg}`));

@@ -3082,6 +3082,133 @@ busCommand
   });
 
 // ---------------------------------------------------------------------------
+// set-shift — write a quiet-hours `shift_schedule` into agent config.json.
+//
+// Shipped templates seed a schedule, but templates only apply to newly-created
+// agents. This is how an existing fleet gets one (or changes its hours).
+//
+// Refuses by default when the requested window would strand a cron: a
+// suppressed fire returns SUCCESSFULLY and advances nextFireAt by a full
+// period, so a daily cron outside the window is suppressed at that time every
+// day thereafter with no error anywhere. --force overrides after review.
+// ---------------------------------------------------------------------------
+
+busCommand
+  .command('set-shift')
+  .description('Set quiet hours (shift_schedule) on one agent or the whole fleet. Refuses windows that would strand a cron.')
+  .argument('[agent]', 'Agent name (omit with --all to apply fleet-wide)')
+  .option('--all', 'Apply to every agent under orgs/*/agents/')
+  .option('--weekday <spec>', 'Mon-Fri shift: "HH:MM-HH:MM", "off", or "24h"', '08:00-22:00')
+  .option('--weekend <spec>', 'Sat-Sun shift: "HH:MM-HH:MM", "off", or "24h"', '08:00-21:00')
+  .option('--clear', 'Remove shift_schedule entirely (restores 24/7 operation)')
+  .option('--dry-run', 'Report what would change without writing')
+  .option('--force', 'Write even when crons would be stranded (review the report first)')
+  .option('--json', 'Emit JSON result instead of a human-readable summary')
+  .action(async (agentArg: string | undefined, opts: {
+    all?: boolean; weekday: string; weekend: string;
+    clear?: boolean; dryRun?: boolean; force?: boolean; json?: boolean;
+  }) => {
+    if (!agentArg && !opts.all) {
+      console.error('Error: name an agent or pass --all.');
+      process.exit(1);
+    }
+    if (agentArg && opts.all) {
+      console.error('Error: pass an agent name or --all, not both.');
+      process.exit(1);
+    }
+    if (agentArg) {
+      try { validateAgentName(agentArg); } catch (err) { console.error(String(err)); process.exit(1); }
+    }
+
+    const { applyShiftSchedule, buildShiftSchedule } = await import('../bus/shift-config.js');
+
+    let schedule = null;
+    if (!opts.clear) {
+      try {
+        schedule = buildShiftSchedule(opts.weekday, opts.weekend);
+      } catch (err) {
+        console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(1);
+      }
+    }
+
+    const env = resolveEnv();
+    const frameworkRoot = env.frameworkRoot || process.cwd();
+    const { existsSync: fsExists, readdirSync: fsReaddir } = require('fs') as typeof import('fs');
+    const orgsDir = join(frameworkRoot, 'orgs');
+
+    // Discover {agent → config.json} the same way reload-crons does.
+    const targets: Array<{ agent: string; configPath: string }> = [];
+    if (fsExists(orgsDir)) {
+      for (const org of fsReaddir(orgsDir, { withFileTypes: true }).filter(d => d.isDirectory()).map(d => d.name)) {
+        const agentsDir = join(orgsDir, org, 'agents');
+        if (!fsExists(agentsDir)) continue;
+        for (const name of fsReaddir(agentsDir, { withFileTypes: true }).filter(d => d.isDirectory()).map(d => d.name)) {
+          if (agentArg && name !== agentArg) continue;
+          const candidate = join(agentsDir, name, 'config.json');
+          if (fsExists(candidate)) targets.push({ agent: name, configPath: candidate });
+        }
+      }
+    }
+
+    if (targets.length === 0) {
+      console.error(agentArg
+        ? `Error: agent '${agentArg}' not found. Check orgs/*/agents/.`
+        : 'Error: no agents found under orgs/*/agents/.');
+      process.exit(1);
+    }
+
+    // Pass 1 — always evaluate dry so a stranding agent aborts the run BEFORE
+    // any config is written. A partially-applied fleet edit is worse than none.
+    const planned = targets.map(t => applyShiftSchedule(t.agent, t.configPath, schedule, { dryRun: true }));
+    const stranding = planned.filter(r => r.strand.stranded.length > 0);
+
+    if (stranding.length > 0 && !opts.force) {
+      console.error('Refusing to write — this window would permanently suppress these crons:\n');
+      for (const r of stranding) {
+        console.error(`  ${r.agent}:`);
+        for (const s of r.strand.stranded) console.error(`    - ${s}`);
+      }
+      console.error('\nA suppressed fire is recorded as a success and re-scheduled a full period later,');
+      console.error('so these would never run again. Widen the window (note: the end is EXCLUSIVE, so an');
+      console.error('18:00 cron needs an end strictly after 18:00), mark the crons wake_on_fire, or --force.');
+      process.exit(1);
+    }
+
+    const results = opts.dryRun
+      ? planned
+      : targets.map(t => applyShiftSchedule(t.agent, t.configPath, schedule, { dryRun: false }));
+
+    if (opts.json) {
+      console.log(JSON.stringify(results, null, 2));
+      return;
+    }
+
+    const verb = opts.dryRun ? 'would be' : '';
+    for (const r of results) {
+      const label = r.action === 'skipped-hermes'
+        ? 'skipped (hermes manages its own crons — the daemon shift gate never runs for it)'
+        : `${r.action} ${verb}`.trim();
+      console.log(`  ${r.agent}: ${label}`);
+      for (const a of r.strand.atRisk) {
+        console.log(`      note: ${a} is a long-period cron — if its fire slot lands off-shift it will stay suppressed. Consider wake_on_fire.`);
+      }
+      for (const u of r.strand.unanalyzed) {
+        console.log(`      note: could not analyze schedule for ${u} — check by hand.`);
+      }
+    }
+
+    const written = results.filter(r => r.action === 'set' || r.action === 'cleared').length;
+    if (opts.dryRun) {
+      console.log(`\nDry run — nothing written. ${written} agent(s) would change.`);
+    } else if (written > 0) {
+      console.log(`\n${written} agent(s) updated. Restart the daemon (or the affected agents) to pick up the new schedule.`);
+    } else {
+      console.log('\nNo changes needed.');
+    }
+  });
+
+// ---------------------------------------------------------------------------
 // upgrade-cron-teaching — Subtask 2.4: scan agent workspace for stale
 // CronCreate / /loop / config.json cron-registration teaching that predates
 // the external-persistent-crons migration.  Scan-only by default; --apply
