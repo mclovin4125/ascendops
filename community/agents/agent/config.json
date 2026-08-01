@@ -6,6 +6,38 @@
   "max_crashes_per_day": 10,
   "working_directory": "",
   "timezone": "",
+  "shift_schedule": {
+    "weekly": {
+      "mon": {
+        "start": "08:00",
+        "end": "22:00"
+      },
+      "tue": {
+        "start": "08:00",
+        "end": "22:00"
+      },
+      "wed": {
+        "start": "08:00",
+        "end": "22:00"
+      },
+      "thu": {
+        "start": "08:00",
+        "end": "22:00"
+      },
+      "fri": {
+        "start": "08:00",
+        "end": "22:00"
+      },
+      "sat": {
+        "start": "08:00",
+        "end": "21:00"
+      },
+      "sun": {
+        "start": "08:00",
+        "end": "21:00"
+      }
+    }
+  },
   "crons": [
     {
       "name": "heartbeat",
@@ -15,6 +47,8 @@
     }
   ],
   "ecosystem": {
-    "local_version_control": { "enabled": true }
+    "local_version_control": {
+      "enabled": true
+    }
   }
 }

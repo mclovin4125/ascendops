@@ -8,6 +8,38 @@
   "tier": "sonnet",
   "working_directory": "",
   "timezone": "",
+  "shift_schedule": {
+    "weekly": {
+      "mon": {
+        "start": "08:00",
+        "end": "22:00"
+      },
+      "tue": {
+        "start": "08:00",
+        "end": "22:00"
+      },
+      "wed": {
+        "start": "08:00",
+        "end": "22:00"
+      },
+      "thu": {
+        "start": "08:00",
+        "end": "22:00"
+      },
+      "fri": {
+        "start": "08:00",
+        "end": "22:00"
+      },
+      "sat": {
+        "start": "08:00",
+        "end": "21:00"
+      },
+      "sun": {
+        "start": "08:00",
+        "end": "21:00"
+      }
+    }
+  },
   "day_mode_start": "",
   "day_mode_end": "",
   "communication_style": "",
@@ -25,24 +57,28 @@
     {
       "name": "nightly-metrics",
       "type": "recurring",
+      "wake_on_fire": true,
       "interval": "24h",
       "prompt": "Run nightly metrics collection: cortextos bus collect-metrics. Review the output and report any anomalies via Telegram to the orchestrator."
     },
     {
       "name": "auto-commit",
       "type": "recurring",
+      "wake_on_fire": true,
       "interval": "24h",
       "prompt": "Read .claude/skills/local-version-control/SKILL.md and execute the daily version control workflow. Stage, review, and commit changes."
     },
     {
       "name": "check-upstream",
       "type": "recurring",
+      "wake_on_fire": true,
       "interval": "24h",
       "prompt": "Read .claude/skills/upstream-sync/SKILL.md and execute the upstream sync workflow. Check for framework updates and report to the orchestrator."
     },
     {
       "name": "catalog-browse",
       "type": "recurring",
+      "wake_on_fire": true,
       "interval": "7d",
       "prompt": "Read .claude/skills/catalog-browse/SKILL.md and execute the catalog browse workflow. Check for new community skills and recommend useful ones."
     }
