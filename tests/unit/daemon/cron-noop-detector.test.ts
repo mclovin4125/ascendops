@@ -106,10 +106,12 @@ describe('CronNoopDetector', () => {
   let logs: CronExecutionLogEntry[];
   let events: Array<{ event: string; severity: string; meta: Record<string, unknown> }>;
   let notifications: string[];
+  let notificationPriorities: Array<string | undefined>;
   let injects: string[];
   let transcriptPath: string | null;
   let status: 'running' | 'starting';
   let hasActivitySince: ReturnType<typeof vi.fn>;
+  let todayNoopPersistentCount: number;
 
   function makeDetector(): CronNoopDetector {
     return new CronNoopDetector({
@@ -121,8 +123,12 @@ describe('CronNoopDetector', () => {
         injects.push(text);
         return { ok: true };
       },
-      notifyOrchestrator: (_agent, text) => notifications.push(text),
+      notifyOrchestrator: (_agent, text, priority) => {
+        notifications.push(text);
+        notificationPriorities.push(priority);
+      },
       hasActivitySince,
+      countTodayNoopPersistent: () => todayNoopPersistentCount,
       transcriptPathFor: () => transcriptPath,
       now: () => new Date(),
     });
@@ -146,10 +152,12 @@ describe('CronNoopDetector', () => {
     logs = [];
     events = [];
     notifications = [];
+    notificationPriorities = [];
     injects = [];
     transcriptPath = null;
     status = 'running';
     hasActivitySince = vi.fn(() => false);
+    todayNoopPersistentCount = 1;
   });
 
   afterEach(() => {
@@ -251,6 +259,28 @@ describe('CronNoopDetector', () => {
       'cron_fire_noop_persistent',
     ]);
     expect(notifications).toHaveLength(1);
+    expect(notificationPriorities).toEqual(['normal']);
+  });
+
+  it('keeps orchestrator notification at normal priority through the 3rd occurrence today', async () => {
+    todayNoopPersistentCount = 3;
+    register(makeDetector());
+
+    await vi.advanceTimersByTimeAsync(verifyDelayMs * 4);
+
+    expect(notifications).toHaveLength(1);
+    expect(notificationPriorities).toEqual(['normal']);
+  });
+
+  it('escalates orchestrator notification to urgent once today\'s count exceeds 3', async () => {
+    todayNoopPersistentCount = 4;
+    register(makeDetector());
+
+    await vi.advanceTimersByTimeAsync(verifyDelayMs * 4);
+
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]).toContain('4 today');
+    expect(notificationPriorities).toEqual(['urgent']);
   });
 
   it('re-inject uses a fresh salt so MessageDedup will not collapse it', async () => {

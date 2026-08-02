@@ -1,7 +1,10 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'fs';
 import { homedir } from 'os';
 import { join, sep } from 'path';
-import type { AgentConfig, AgentStatus, CronExecutionLogEntry } from '../types/index.js';
+import type { AgentConfig, AgentStatus, CronExecutionLogEntry, Priority } from '../types/index.js';
+
+/** Escalate to 'urgent' once a day's noop_persistent count exceeds this. */
+export const NOOP_PERSISTENT_URGENT_THRESHOLD = 3;
 
 export const CRON_NOOP_VERIFY_DELAY_MS = 75_000;
 export interface CronTranscriptLookup {
@@ -130,8 +133,10 @@ export interface CronNoopDetectorOptions {
   emitEvent: (agentName: string, event: string, severity: 'info' | 'warning' | 'error', meta: Record<string, unknown>) => void;
   getStatus: (agentName: string) => AgentStatus | null;
   inject: (agentName: string, text: string) => InjectResult;
-  notifyOrchestrator: (agentName: string, text: string) => void;
+  notifyOrchestrator: (agentName: string, text: string, priority?: Priority) => void;
   hasActivitySince?: (agentName: string, firedAt: string) => boolean;
+  /** Count of this agent's noop_persistent entries logged so far today (inclusive of the one just appended). */
+  countTodayNoopPersistent?: (agentName: string) => number;
   logger?: (msg: string) => void;
   now?: () => Date;
   transcriptPathFor?: (agentDir: string, config: AgentConfig) => string | null;
@@ -146,6 +151,7 @@ export class CronNoopDetector {
   private readonly inject: CronNoopDetectorOptions['inject'];
   private readonly notifyOrchestrator: CronNoopDetectorOptions['notifyOrchestrator'];
   private readonly hasActivitySince: (agentName: string, firedAt: string) => boolean;
+  private readonly countTodayNoopPersistent: (agentName: string) => number;
   private readonly logger: (msg: string) => void;
   private readonly now: () => Date;
   private readonly transcriptPathFor: (agentDir: string, config: AgentConfig) => string | null;
@@ -158,6 +164,7 @@ export class CronNoopDetector {
     this.inject = options.inject;
     this.notifyOrchestrator = options.notifyOrchestrator;
     this.hasActivitySince = options.hasActivitySince ?? (() => false);
+    this.countTodayNoopPersistent = options.countTodayNoopPersistent ?? (() => 0);
     this.logger = options.logger ?? (() => {});
     this.now = options.now ?? (() => new Date());
     this.transcriptPathFor = options.transcriptPathFor ?? ((agentDir, config) => resolveClaudeTranscriptPath(config, agentDir));
@@ -362,9 +369,13 @@ export class CronNoopDetector {
       reason: reason ?? 'salted user turn absent after re-inject verification windows',
     };
     this.emitEvent(pending.agentName, 'cron_fire_noop_persistent', 'error', meta);
+
+    const occurrencesToday = this.countTodayNoopPersistent(pending.agentName);
+    const priority: Priority = occurrencesToday > NOOP_PERSISTENT_URGENT_THRESHOLD ? 'urgent' : 'normal';
     this.notifyOrchestrator(
       pending.agentName,
-      `Persistent cron fire no-op detected for ${pending.agentName}/${pending.cronName}. Salt was not found in the Claude transcript after detector verification and one safe re-inject. Reason: ${meta.reason}`,
+      `Persistent cron fire no-op detected for ${pending.agentName}/${pending.cronName} (${occurrencesToday} today). Salt was not found in the Claude transcript after detector verification and one safe re-inject. Reason: ${meta.reason}`,
+      priority,
     );
   }
 }

@@ -9,6 +9,7 @@ import { resolveSlackInboundMode } from './slack-inbound-mode.js';
 import { CronScheduler } from './cron-scheduler.js';
 import { syncCronsForAgent } from './cron-migration.js';
 import { appendExecutionLog } from './cron-execution-log.js';
+import { getExecutionLog } from '../bus/crons.js';
 import { CronNoopDetector } from './cron-noop-detector.js';
 import type { CronDefinition } from '../types/index.js';
 import { TelegramAPI } from '../telegram/api.js';
@@ -92,7 +93,8 @@ export class AgentManager {
       getStatus: (agentName) => this.getAgentStatus(agentName),
       inject: (agentName, text) => this.injectAgentDetailed(agentName, text),
       hasActivitySince: (agentName, firedAt) => this.hasPostCronActivity(agentName, firedAt),
-      notifyOrchestrator: (agentName, text) => {
+      countTodayNoopPersistent: (agentName) => this.countTodayNoopPersistentEvents(agentName),
+      notifyOrchestrator: (agentName, text, priority) => {
         try {
           const resolvedOrg = this.resolveAgentOrg(agentName);
           const orchestratorName = this.resolveOrgOrchestrator(resolvedOrg);
@@ -101,13 +103,31 @@ export class AgentManager {
             return;
           }
           const paths = resolvePaths(agentName, this.instanceId, resolvedOrg);
-          sendMessage(paths, 'daemon', orchestratorName, 'normal', text);
+          sendMessage(paths, 'daemon', orchestratorName, priority ?? 'normal', text);
         } catch (err) {
           console.log(`[cron-noop-detector] orchestrator notify failed for ${agentName} (non-fatal): ${err}`);
         }
       },
       logger: (msg) => console.log(msg),
     });
+  }
+
+  /**
+   * Count this agent's noop_persistent cron-fire entries logged so far today (UTC).
+   * Drives CronNoopDetector's urgent-escalation threshold - a fleet-wide bug on
+   * 2026-07-25 produced 22 of these across 4 agents with each one landing as an
+   * unremarkable normal-priority orchestrator message, so nobody noticed until
+   * someone went looking. Reads the same execution-log JSONL the dashboard uses.
+   */
+  private countTodayNoopPersistentEvents(agentName: string): number {
+    try {
+      const todayUTC = new Date().toISOString().slice(0, 10);
+      const entries = getExecutionLog(agentName, undefined, 0, 0, 'failure');
+      return entries.filter((e) => e.status === 'noop_persistent' && e.ts.slice(0, 10) === todayUTC).length;
+    } catch (err) {
+      console.log(`[cron-noop-detector] noop_persistent count failed for ${agentName} (non-fatal): ${err}`);
+      return 0;
+    }
   }
 
   /**

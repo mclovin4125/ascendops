@@ -113,7 +113,7 @@ Full reference: `.claude/skills/goal-management/SKILL.md`
 cat $CTX_FRAMEWORK_ROOT/orgs/$CTX_ORG/goals.json
 ```
 
-- If `daily_focus_set_at` is not today AND it is before 10 AM: trigger morning review now - read `.claude/skills/morning-review/SKILL.md`
+- If `daily_focus_set_at` is not today AND it is currently Day Mode (see SYSTEM.md for the window): trigger morning review now - read `.claude/skills/morning-review/SKILL.md`. Checking this on every heartbeat (not just a fixed morning cutoff) means a missed morning-review cron still catches up later the same day instead of staying stale until tomorrow.
 - If `north_star` is empty: message user via Telegram to set it
 - If any agent has an empty `goals.json` (focus and goals both empty): write their goals and regenerate GOALS.md
 
