@@ -13,26 +13,45 @@ import {
 interface DashboardShellProps {
   orgs: string[];
   brandName?: string;
+  /** Org resolved from the cookie on the server. Used as the initial value so
+   *  the first client render matches the server HTML (no hydration mismatch). */
+  initialOrg?: string;
   children: React.ReactNode;
 }
 
-export function DashboardShell({ orgs, brandName, children }: DashboardShellProps) {
-  const [currentOrg, setCurrentOrg] = useState<string>(() => {
-    if (typeof window !== 'undefined') {
-      // URL is authoritative: if ?org= is present, use it so server and client agree.
-      // Fall back to localStorage for the common case of navigating without a param.
-      const urlOrg = new URLSearchParams(window.location.search).get('org');
-      if (urlOrg && (urlOrg === 'all' || orgs.includes(urlOrg))) return urlOrg;
-      const saved = localStorage.getItem('cortextos-org');
-      if (saved && (saved === 'all' || orgs.includes(saved))) return saved;
-    }
-    return 'all';
-  });
+const ORG_COOKIE = 'cortextos-org';
+
+export function DashboardShell({ orgs, brandName, initialOrg = 'all', children }: DashboardShellProps) {
+  // Deterministic on server and client: both start from the cookie-derived
+  // prop. Reading localStorage/URL here would diverge from the server and
+  // break hydration — those are reconciled in effects after mount instead.
+  const [currentOrg, setCurrentOrg] = useState<string>(initialOrg);
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
-  // Persist org selection to localStorage
+  // Reconcile the org after mount, where reading the URL/localStorage can't
+  // cause a hydration mismatch. Priority: ?org= deep link > cookie (already
+  // applied via initialOrg) > last localStorage selection. The localStorage
+  // fallback also migrates returning users who have no cookie yet — adopting
+  // it here seeds the cookie via the persistence effect below.
   useEffect(() => {
-    localStorage.setItem('cortextos-org', currentOrg);
+    const isValid = (o: string) => o === 'all' || orgs.includes(o);
+    const urlOrg = new URLSearchParams(window.location.search).get('org');
+    if (urlOrg && isValid(urlOrg)) {
+      if (urlOrg !== currentOrg) setCurrentOrg(urlOrg);
+      return;
+    }
+    if (initialOrg === 'all') {
+      const saved = localStorage.getItem(ORG_COOKIE);
+      if (saved && isValid(saved) && saved !== currentOrg) setCurrentOrg(saved);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Persist org selection to localStorage and to a cookie the server layout
+  // reads on the next request so its first paint matches the client.
+  useEffect(() => {
+    localStorage.setItem(ORG_COOKIE, currentOrg);
+    document.cookie = `${ORG_COOKIE}=${encodeURIComponent(currentOrg)}; path=/; max-age=31536000; samesite=lax`;
   }, [currentOrg]);
 
   return (
