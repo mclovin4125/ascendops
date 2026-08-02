@@ -2273,8 +2273,10 @@ busCommand
   .description('List pending approval requests')
   .option('--format <fmt>', 'Output format: json|text', 'json')
   .option('--all-orgs', 'Scan all orgs under CTX_ROOT (matches dashboard view)', false)
-  .action((opts: { format?: string; allOrgs?: boolean }) => {
-    const { listPendingApprovals } = require('../bus/approval.js');
+  .option('--stale', 'Only show approvals pending past the staleness threshold', false)
+  .option('--stale-hours <n>', 'Staleness threshold in hours (default: 4, one heartbeat cycle)', '4')
+  .action((opts: { format?: string; allOrgs?: boolean; stale?: boolean; staleHours?: string }) => {
+    const { listPendingApprovals, isApprovalStale } = require('../bus/approval.js');
     const { readdirSync, existsSync } = require('fs');
     const { join, homedir: _homedir } = require('path');
     const { homedir } = require('os');
@@ -2300,15 +2302,26 @@ busCommand
       approvals = listPendingApprovals(paths);
     }
 
+    const staleThresholdMs = (parseFloat(opts.staleHours ?? '4') || 4) * 60 * 60 * 1000;
+    const now = Date.now();
+    approvals = (approvals as Array<{ created_at: string }>).map((a) => ({
+      ...a,
+      age_hours: Math.round(((now - new Date(a.created_at).getTime()) / (60 * 60 * 1000)) * 10) / 10,
+      stale: isApprovalStale(a, staleThresholdMs, now),
+    }));
+    if (opts.stale) {
+      approvals = (approvals as Array<{ stale: boolean }>).filter((a) => a.stale);
+    }
+
     if (opts.format === 'text') {
-      if (approvals.length === 0) { console.log('No pending approvals'); return; }
-      for (const a of approvals as Array<{ id: string; title: string; category: string; requesting_agent: string; created_at: string; description?: string; org?: string }>) {
-        console.log(`[${a.id}] ${a.title}`);
-        console.log(`  Category: ${a.category} | Agent: ${a.requesting_agent} | Org: ${a.org ?? env.org} | Created: ${a.created_at}`);
+      if (approvals.length === 0) { console.log(opts.stale ? 'No stale approvals' : 'No pending approvals'); return; }
+      for (const a of approvals as Array<{ id: string; title: string; category: string; requesting_agent: string; created_at: string; description?: string; org?: string; age_hours: number; stale: boolean }>) {
+        console.log(`[${a.id}]${a.stale ? ' [STALE]' : ''} ${a.title}`);
+        console.log(`  Category: ${a.category} | Agent: ${a.requesting_agent} | Org: ${a.org ?? env.org} | Created: ${a.created_at} (${a.age_hours}h ago)`);
         if (a.description) console.log(`  Context: ${a.description}`);
         console.log('');
       }
-      console.log(`Total: ${approvals.length} pending`);
+      console.log(`Total: ${approvals.length}${opts.stale ? ' stale' : ' pending'}`);
     } else {
       console.log(JSON.stringify(approvals, null, 2));
     }
