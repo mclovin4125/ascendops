@@ -1857,9 +1857,12 @@ describe('FastChecker', () => {
       expect(checker.stdoutLastChangeAt).toBeLessThanOrEqual(afterNow);
       expect(checker.stdoutLastSize).toBe(0);
       expect(checker.lastHardRestartAt).toBe(666);
-      expect(checker.watchdogCircuitBroken).toBe(false);
-      expect(checker.watchdogRestarts).toEqual([]);
-      expect(checker.watchdogCircuitBrokenAt).toBe(0);
+      // The circuit breaker's own state must survive a session-start reset -
+      // otherwise the restart that triggers a new session also erases the
+      // very history the breaker needs to detect a runaway restart loop.
+      expect(checker.watchdogCircuitBroken).toBe(true);
+      expect(checker.watchdogRestarts).toHaveLength(2);
+      expect(checker.watchdogCircuitBrokenAt).not.toBe(0);
     });
   });
 
