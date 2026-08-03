@@ -427,7 +427,7 @@ async function main(): Promise<void> {
         : `🔄 ${agentName} restarted (planned): ${reason || 'no reason given'}`;
       break;
     case 'session-refresh':
-      message = `♻️ ${agentName} session refresh (context exhaustion). Restarting with fresh session.`;
+      message = `♻️ ${agentName} session refresh: ${reason || 'no reason given'}. Restarting with fresh session.`;
       break;
     case 'user-restart':
       message = `🔄 ${agentName} restarted by user: ${reason || 'no reason given'}`;

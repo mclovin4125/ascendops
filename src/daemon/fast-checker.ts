@@ -1404,7 +1404,8 @@ export class FastChecker {
     this.watchdogTriggered = true;
     this.lastHardRestartAt = now;
     this.preserveRecentHandoffDoc();
-    this.agent.sessionRefresh().catch((err) => this.log(`Stalled-turn session refresh failed: ${err}`));
+    this.agent.sessionRefresh(`stalled-turn watchdog recovery: ${reason}`)
+      .catch((err) => this.log(`Stalled-turn session refresh failed: ${err}`));
   }
 
   private loadTurnWatchdogRecoveries(): void {
@@ -2882,7 +2883,12 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
 
     // sessionRefresh() does stop() + start(); shouldContinue() will return false
     // because .force-fresh was just written, giving us a clean fresh session.
-    this.agent.sessionRefresh().catch(err => this.log(`Context restart failed: ${err}`));
+    // .restart-planned (written above by hardRestart()) is checked before
+    // .session-refresh in hook-crash-alert.ts's marker list, so it already wins
+    // for classification — pass the same reason here too as defense-in-depth
+    // in case .restart-planned is ever missing/stale when this hook fires.
+    this.agent.sessionRefresh(`CONTEXT-FORCE-RESTART: ${reason}`)
+      .catch(err => this.log(`Context restart failed: ${err}`));
   }
 
   /** @internal */

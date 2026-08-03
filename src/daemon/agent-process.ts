@@ -445,10 +445,10 @@ export class AgentProcess {
    * `start()` will pick up `continue` mode automatically because the
    * conversation directory still has .jsonl files (shouldContinue() is true).
    */
-  async sessionRefresh(): Promise<void> {
+  async sessionRefresh(reason: string = 'session-time-cap rollover'): Promise<void> {
     if (this.sessionRefreshPromise) return this.sessionRefreshPromise;
 
-    const operation = this.performSessionRefresh();
+    const operation = this.performSessionRefresh(reason);
     this.sessionRefreshPromise = operation;
     try {
       await operation;
@@ -457,12 +457,12 @@ export class AgentProcess {
     }
   }
 
-  private async performSessionRefresh(): Promise<void> {
+  private async performSessionRefresh(reason: string): Promise<void> {
     if (this.status === 'halted' || this.status === 'stopped') {
       this.log(`Refusing session refresh in status=${this.status}`);
       return;
     }
-    this.log('Session refresh (--continue restart)');
+    this.log(`Session refresh (--continue restart): ${reason}`);
     // Write .session-refresh marker so the SessionEnd crash-alert hook
     // (src/hooks/hook-crash-alert.ts) classifies the imminent PTY exit as a
     // session refresh rather than a crash. The hook's marker handler +
@@ -470,11 +470,18 @@ export class AgentProcess {
     // but no writer existed — every --continue rollover at the session-time
     // cap surfaced as a false-positive 'crash' on chief/analyst + the
     // crashes.log file.
+    //
+    // The marker content used to be hardcoded to 'session-time-cap rollover'
+    // regardless of caller, so restarts.log/crashes.log mislabeled every
+    // non-timer sessionRefresh() (e.g. the stalled-turn watchdog) as a
+    // session-time-cap firing even though the cap was nowhere near elapsed.
+    // Callers now pass their own reason; this stays the default only for the
+    // timer's own call site.
     try {
       const paths = resolvePaths(this.name, this.env.instanceId, this.env.org);
       writeFileSync(
         join(paths.stateDir, '.session-refresh'),
-        'session-time-cap rollover\n',
+        `${reason}\n`,
         'utf-8',
       );
     } catch (err) {
@@ -503,11 +510,11 @@ export class AgentProcess {
       }
     }
 
-    const reason = `session refresh failed after 3 attempts: ${lastError?.message ?? 'unknown error'}`;
+    const escalationReason = `session refresh failed after 3 attempts: ${lastError?.message ?? 'unknown error'}`;
     this.appendSessionRefreshToRestartsLog('SESSION_REFRESH_ESCALATION', 3, 0, lastError);
-    this.log(`Escalating failed session refresh to a fresh hard restart: ${reason}`);
+    this.log(`Escalating failed session refresh to a fresh hard restart: ${escalationReason}`);
     try {
-      await this.hardRestartSelf(reason);
+      await this.hardRestartSelf(escalationReason);
     } catch (err) {
       const escalationError = err instanceof Error ? err : new Error(String(err));
       this.appendSessionRefreshToRestartsLog('SESSION_REFRESH_ESCALATION_FAILED', 3, 0, escalationError);
