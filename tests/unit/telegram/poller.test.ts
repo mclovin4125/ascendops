@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, existsSync, readFileSync } from 'fs';
-import { join } from 'path';
+import { basename, join } from 'path';
 import { tmpdir } from 'os';
 import { TelegramPoller } from '../../../src/telegram/poller';
 import type { TelegramAPI } from '../../../src/telegram/api';
@@ -240,6 +240,85 @@ describe('TelegramPoller — offset-after-handler', () => {
 
     await expect(running).resolves.toBeUndefined();
     expect(poller.lastExitReason).toBe('stopped-externally');
+  });
+
+  /**
+   * Regression: pollOnce used to catch Conflict, log, sleep 10s and return
+   * normally, so start() never saw it. 'conflict-self-die' was unreachable,
+   * AgentManager's poller-supervisor never ran, and its 5-minute give-up
+   * alert could never fire — the poller hot-looped on Conflict forever while
+   * the agent silently received no inbound Telegram.
+   */
+  describe('409 Conflict reaches the supervisor', () => {
+    let errSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    });
+
+    afterEach(() => {
+      errSpy.mockRestore();
+    });
+
+    function conflictingApi(message: string): TelegramAPI {
+      return {
+        botId: '8861437016',
+        getUpdates: vi.fn(async () => { throw new Error(message); }),
+      } as unknown as TelegramAPI;
+    }
+
+    it('exits with conflict-self-die instead of looping, so the supervisor can retake the lock', async () => {
+      const api = conflictingApi('Telegram API error: Conflict: terminated by other getUpdates request');
+      const poller = new TelegramPoller(api, stateDir);
+
+      await poller.start();
+
+      expect(poller.lastExitReason).toBe('conflict-self-die');
+      // One attempt, then yield — not a hot loop.
+      expect(api.getUpdates).toHaveBeenCalledTimes(1);
+    });
+
+    it('classifies the bare "terminated by other getUpdates" wording as a Conflict too', async () => {
+      const api = conflictingApi('terminated by other getUpdates request');
+      const poller = new TelegramPoller(api, stateDir);
+
+      await poller.start();
+
+      expect(poller.lastExitReason).toBe('conflict-self-die');
+    });
+
+    it('names the agent and bot in the Conflict log so the affected bot is identifiable', async () => {
+      const api = conflictingApi('Conflict: terminated by other getUpdates request');
+      const poller = new TelegramPoller(api, stateDir);
+
+      await poller.start();
+
+      const logged = errSpy.mock.calls.map((c) => String(c[0])).join('\n');
+      expect(logged).toMatch(/409 Conflict/);
+      expect(logged).toContain(basename(stateDir)); // agent name
+      expect(logged).toContain('8861437016');       // bot id
+    });
+
+    it('keeps polling through a non-Conflict transient error, tagged with the same label', async () => {
+      let calls = 0;
+      const api = {
+        botId: '8861437016',
+        getUpdates: vi.fn(async () => {
+          calls += 1;
+          if (calls === 1) throw new Error('fetch failed');
+          poller.stop();
+          return { result: [] };
+        }),
+      } as unknown as TelegramAPI;
+      const poller = new TelegramPoller(api, stateDir, 1);
+
+      await poller.start();
+
+      expect(calls).toBeGreaterThan(1); // transient error did not end the loop
+      const logged = errSpy.mock.calls.map((c) => String(c[0])).join('\n');
+      expect(logged).toMatch(/Poll error/);
+      expect(logged).toContain(basename(stateDir));
+    });
   });
 });
 

@@ -1,5 +1,5 @@
 import { readFileSync, writeFileSync, existsSync } from 'fs';
-import { join } from 'path';
+import { basename, join } from 'path';
 import type { TelegramUpdate, TelegramMessage, TelegramCallbackQuery, TelegramMessageReaction } from '../types/index.js';
 import { TelegramAPI } from './api.js';
 import { ensureDir } from '../utils/atomic.js';
@@ -34,6 +34,16 @@ export class TelegramPoller {
   private callbackHandlers: CallbackHandler[] = [];
   private reactionHandlers: ReactionHandler[] = [];
   private pollInterval: number;
+  /**
+   * Human-readable "<agent>[/<suffix>] bot <botId>" tag prefixed to every
+   * diagnostic this poller emits.
+   *
+   * The daemon runs one poller per agent in a single process, each bound to a
+   * different bot token. Unattributed poller errors are therefore unactionable
+   * — a Conflict storm ran for twelve days against two of four bots because
+   * `[telegram-poller] Conflict detected` never said which.
+   */
+  private label: string;
   /** The currently active long-poll, cancelled by an explicit stop(). */
   private abortController: AbortController | null = null;
   /**
@@ -84,6 +94,10 @@ export class TelegramPoller {
       );
     }
     TelegramPoller.claimedOffsetFiles.add(this.offsetFilePath);
+    // stateDir is `<ctxRoot>/state/<agent>`, so its basename is the agent name.
+    // Derived rather than passed so every existing call site gains attribution
+    // without a signature change.
+    this.label = `${basename(stateDir)}${offsetFileSuffix ? `/${offsetFileSuffix}` : ''} bot ${api.botId ?? 'unknown'}`;
     this.loadOffset();
   }
 
@@ -130,13 +144,20 @@ export class TelegramPoller {
         // (e.g. a not-yet-released connection lingering ~60s after a daemon
         // crash). Exit the loop with a distinct reason so the supervisor can
         // sleep and retake the lock, rather than hot-looping on Conflict.
-        if (/Conflict/i.test(msg)) {
+        // Telegram phrases this as "Conflict: terminated by other getUpdates
+        // request"; match either half so a wording change on one side does
+        // not silently reclassify a Conflict as a transient poll error.
+        if (/Conflict/i.test(msg) || /terminated by other getUpdates/i.test(msg)) {
+          console.error(
+            `[telegram-poller] ${this.label}: 409 Conflict — another getUpdates ` +
+            `holder owns this bot's lock. Yielding to the supervisor.`,
+          );
           this.lastExitReason = 'conflict-self-die';
           this.running = false;
           return;
         }
         // Other errors are transient — log and continue polling.
-        console.error('[telegram-poller] Poll error:', err);
+        console.error(`[telegram-poller] ${this.label}: Poll error:`, err);
       }
       await sleep(this.pollInterval);
     }
@@ -172,23 +193,21 @@ export class TelegramPoller {
     let result;
     const controller = new AbortController();
     this.abortController = controller;
+    // Every getUpdates failure — including 409 Conflict — propagates to
+    // start(), which owns the classification.
+    //
+    // Conflict used to be caught here: logged, slept 10s, and returned
+    // normally. That made start()'s 'conflict-self-die' branch unreachable,
+    // so AgentManager's poller-supervisor never ran and its 5-minute give-up
+    // alert ("Inspect for duplicate bot instance") could never fire. The
+    // poller hot-looped on Conflict forever instead, silently — a duplicate
+    // getUpdates holder on two of four bots went unnoticed for twelve days
+    // while those agents received no inbound Telegram at all.
+    //
+    // An intentional stop() racing an in-flight Conflict is still classified
+    // correctly: start() checks `!this.running` before it tests for Conflict.
     try {
       result = await this.api.getUpdates(this.offset, 1, controller.signal);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes('Conflict') || msg.includes('terminated by other getUpdates')) {
-        if (!this.running) {
-          // Intentional stop() raced an in-flight Conflict: do not enter the
-          // 10s backoff and do not let the Conflict be classified as a
-          // restartable exit — rethrow so start()'s !running guard records
-          // 'stopped-externally' and returns immediately.
-          throw err;
-        }
-        console.error('[telegram-poller] Conflict detected (another poller active), backing off 10s');
-        await sleep(10_000);
-        return;
-      }
-      throw err;
     } finally {
       if (this.abortController === controller) this.abortController = null;
     }
