@@ -883,7 +883,11 @@ export class FastChecker {
   /**
    * Single poll cycle: check inbox + queued Telegram messages.
    */
-  private async pollCycle(): Promise<void> {
+  // 2026-08-02 (task_1785296973718_84792376): extracted from pollCycle so the
+  // 2026-07-29 slow-step instrumentation can cover it — this block and
+  // sendTyping were previously the only uninstrumented steps in pollCycle,
+  // so a hang here was invisible to the WATCHDOG slow-step log.
+  private async processInboundMessages(): Promise<void> {
     let messageBlock = '';
     const ackIds: string[] = [];
 
@@ -946,10 +950,17 @@ export class FastChecker {
         }
       }
     }
+  }
+
+  private async pollCycle(): Promise<void> {
+    // Process queued Telegram + inbox messages and inject into the agent PTY.
+    await this.timeStepAsync('processInboundMessages', () => this.processInboundMessages());
 
     // Typing indicator: send while Claude is actively working
     if (this.chatId && this.telegramApi && this.isAgentActive()) {
-      await this.sendTyping(this.telegramApi, this.chatId);
+      const telegramApi = this.telegramApi;
+      const chatId = this.chatId;
+      await this.timeStepAsync('sendTyping', () => this.sendTyping(telegramApi, chatId));
     }
 
     // Watchdog: detect ctx-exhaustion survey + frozen stdout
@@ -979,6 +990,12 @@ export class FastChecker {
   // the same guess-from-the-diff cycle. Threshold is well under the 30s
   // pollCycle timeout and far above every step's documented normal cost, so
   // it should stay silent outside a real regression.
+  // 2026-08-02: extended to processInboundMessages and sendTyping — 19h+ of
+  // fleet-wide stalls into this investigation, checkUsageTier was the only
+  // step ever logged as slow (149/149 occurrences, capped at ~5s by its own
+  // execFile timeout), which ruled it out as the stall's direct cause and
+  // meant the real hang had to be in one of these two previously-uncovered
+  // steps. Confirm with the pm2 daemon out-log after the next stall.
   private static readonly SLOW_STEP_THRESHOLD_MS = 1000;
 
   private timeStep(label: string, fn: () => void): void {
