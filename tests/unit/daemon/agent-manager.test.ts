@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { buildReplyContext } from '../../../src/daemon/agent-manager.js';
@@ -453,6 +453,19 @@ describe('AgentManager fleet back-online notification coalescing', () => {
     expect(telegramSendMessageMock).toHaveBeenCalledTimes(2);
     expect(telegramSendMessageMock).toHaveBeenNthCalledWith(1, 'chat-1', 'Agent alice crashed (crash #1) — auto-restarting');
     expect(telegramSendMessageMock).toHaveBeenNthCalledWith(2, 'chat-1', 'Agent alice recovered and is back online');
+
+    // Daemon-internal alerts (crash/halt/recovery) previously never reached
+    // outbound-messages.jsonl — only the CLI's send-telegram command logged.
+    // That left these alerts invisible to the audit trail even though they
+    // genuinely go out over Telegram. Confirm both land in the log now.
+    const outboundLog = readFileSync(join(ctxRoot, 'logs', 'alice', 'outbound-messages.jsonl'), 'utf-8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    expect(outboundLog).toHaveLength(2);
+    expect(outboundLog[0].text).toBe('Agent alice crashed (crash #1) — auto-restarting');
+    expect(outboundLog[1].text).toBe('Agent alice recovered and is back online');
+    expect(outboundLog.every((entry) => entry.agent === 'alice' && entry.chat_id === 'chat-1')).toBe(true);
   });
 });
 

@@ -726,13 +726,27 @@ export class AgentManager {
         const logSendFail = (kind: string) => (err: unknown) => {
           log(`Telegram ${kind} alert for ${name} failed: ${err instanceof Error ? err.message : String(err)}`);
         };
+        // Daemon-internal sends bypass the CLI's send-telegram path (the only
+        // call site that previously logged to outbound-messages.jsonl), so
+        // these alerts were invisible to the audit trail even though they
+        // reach Telegram. Log each one here on success so the trail is
+        // complete regardless of which path sent the message.
+        const logSent = (alertText: string) => (result: any) => {
+          try {
+            logOutboundMessage(this.ctxRoot, name, tgChatId, alertText, result?.result?.message_id ?? 0);
+          } catch { /* logging must never break the alert path */ }
+        };
         if (status.status === 'crashed') {
           const crashNum = status.crashCount ?? '?';
-          tgApi.sendMessage(tgChatId, `Agent ${name} crashed (crash #${crashNum}) — auto-restarting`).catch(logSendFail('crash'));
+          const alertText = `Agent ${name} crashed (crash #${crashNum}) — auto-restarting`;
+          tgApi.sendMessage(tgChatId, alertText).then(logSent(alertText)).catch(logSendFail('crash'));
         } else if (status.status === 'halted') {
-          tgApi.sendMessage(tgChatId, `Agent ${name} HALTED — exceeded crash limit. Restart manually with: cortextos start ${name}`).catch(logSendFail('halt'));
+          const alertText = `Agent ${name} HALTED — exceeded crash limit. Restart manually with: cortextos start ${name}`;
+          tgApi.sendMessage(tgChatId, alertText).then(logSent(alertText)).catch(logSendFail('halt'));
         } else if (status.status === 'running' && prevStatusForReset === 'crashed') {
-          tgApi.sendMessage(tgChatId, `Agent ${name} recovered and is back online`).then(() => {
+          const alertText = `Agent ${name} recovered and is back online`;
+          tgApi.sendMessage(tgChatId, alertText).then((result) => {
+            logSent(alertText)(result);
             log(`Telegram recovery back-online alert for ${name} sent successfully`);
           }).catch(logSendFail('recovery'));
         }
