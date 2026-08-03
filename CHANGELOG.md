@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Overnight Boot Storms — Staleness Watchdogs vs. Machine Sleep
+
+The remaining, and dominant, cause of agents restarting all night: **`src/daemon/fast-checker.ts` treated machine sleep as an agent hang.**
+
+- **Staleness watchdogs now discount time the daemon was not running.** Every "nothing has happened for N seconds, the agent is wedged" check inferred N from a `Date.now()` delta, which cannot tell a wedged agent from a suspended laptop. A Mac that idle-sleeps wakes on the ~53min `mDNSResponder` DHCP-lease maintenance timer; Node timers do not fire while asleep, so each wake made the clock jump past every threshold at once. The pollCycle watchdog (90s threshold) won the race every time and hard-restarted the whole fleet. Measured on the reporting install: **103 of 103 `WATCHDOG-HARD-RESTART` entries landed within ~5s of a system wake**, all four agents at the same millisecond, with logged "stalls" of 189s–10510s exactly matching the preceding sleep durations.
+  - A dedicated 5s liveness ticker banks wall-clock gaps during which the process was demonstrably not scheduled; `runningElapsedSince()` subtracts the banked overlap. Applied to the three staleness thresholds: pollCycle stall, stdout-frozen (Signal 2), and the stalled-turn watchdog.
+  - **Cooldowns and grace periods deliberately stay on wall clock** (`HARD_RESTART_COOLDOWN_MS`, `BOOTSTRAP_GRACE_MS`, circuit-breaker reset), where elapsed real time is the intended meaning.
+  - **Suspend is not distinguished from a blocked event loop** — the timer misses ticks either way — and it does not need to be. Crediting both costs nothing: a genuinely wedged pollCycle still accrues real running-time stall and trips one 30s tick later, and an event loop blocked forever cannot fire a watchdog at all.
+  - These restarts were logged `type=planned-restart`, so the crash-loop guard below never counted them and the `shift_schedule` gate never applied — the watchdog is not a cron fire. Quiet hours were working correctly the whole time (`cron_suppressed_off_shift` in the analytics stream); the restarts came from a different mechanism entirely.
+- **Regression tests**: `tests/unit/daemon/fast-checker-suspend.test.ts` — 11 cases covering the accounting (jitter tolerance, partial-overlap windows, backwards clock steps, retention pruning) and the turn watchdog end-to-end: silent across a 3197s sleep, still fires when the same time passes awake, and still fires once a real stall accrues after a sleep.
+
 ### Overnight Boot Storms — Crash-Loop Guard & Quiet Hours
 
 Two independent causes of agents restarting and working through the night.
