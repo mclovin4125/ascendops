@@ -145,6 +145,7 @@ export class FastChecker {
   // Idle-session heartbeat watchdog
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private pollCycleWatchdog: NodeJS.Timeout | null = null;
+  private livenessTimer: NodeJS.Timeout | null = null;
 
   // Gmail watch state
   private gmailWatch?: { query: string; intervalMs: number; processedLabelId?: string };
@@ -188,6 +189,28 @@ export class FastChecker {
   private bootstrappedAt: number = 0;
   private lastPollCycleCompletedAt: number = 0;
   private readonly POLL_CYCLE_TIMEOUT_MS = 30_000;
+  // Suspend accounting. Every staleness watchdog below infers "nothing has
+  // happened for N seconds" from a wall-clock delta, which cannot tell a wedged
+  // agent apart from a laptop that was asleep. On a Mac that idle-sleeps and
+  // wakes on the ~53min mDNSResponder DHCP maintenance timer, every wake made
+  // Date.now() jump past every threshold at once and hard-restarted the whole
+  // fleet — all night, every night. A dedicated short-period ticker records the
+  // wall-clock gaps during which this process was demonstrably not scheduled;
+  // runningElapsedSince() then discounts them so thresholds measure time the
+  // daemon was actually alive to observe the agent.
+  //
+  // This deliberately does NOT try to tell suspend from a blocked event loop —
+  // the timer misses ticks either way. It credits both, which costs nothing: a
+  // genuinely wedged pollCycle still accrues real running-time stall and trips
+  // the watchdog one 30s tick later, and an event loop blocked forever can't
+  // fire a watchdog at all. Cooldowns and grace periods stay on wall clock,
+  // where elapsed real time is the intended meaning.
+  private lastLivenessAt: number = 0;
+  private suspendEvents: Array<{ endedAt: number; gapMs: number }> = [];
+  private readonly LIVENESS_TICK_MS = 5_000;
+  // Tolerance must exceed any legitimate scheduling delay of a 5s timer under
+  // load; anything above it is real unscheduled time, not jitter.
+  private readonly LIVENESS_TOLERANCE_MS = 30_000;
   // Circuit breaker state — track recent auto-restarts and pause the
   // watchdog if it keeps firing (upstream is down, restarting won't help)
   private watchdogRestarts: number[] = [];
@@ -506,10 +529,17 @@ export class FastChecker {
     // the poll loop. Gives the hung operation 30s (pollCycle timeout) + 60s
     // buffer before deciding the session is truly wedged.
     this.lastPollCycleCompletedAt = Date.now();
+    // Suspend detector. Runs on its own short period so a wake is observed
+    // before any watchdog gets a chance to read a jumped clock.
+    this.lastLivenessAt = Date.now();
+    this.livenessTimer = setInterval(() => this.noteLiveness(), this.LIVENESS_TICK_MS);
     const WATCHDOG_INTERVAL_MS = 30 * 1000;
     const STALL_THRESHOLD_MS = 90 * 1000;
     this.pollCycleWatchdog = setInterval(() => {
       const now = Date.now();
+      // Fold this tick into suspend accounting before reading any timestamp:
+      // on wake this tick may well land ahead of the 5s detector.
+      this.noteLiveness(now);
       if (this.bootstrappedAt === 0) return;
       if (now - this.bootstrappedAt < STALL_THRESHOLD_MS) return;
 
@@ -524,7 +554,7 @@ export class FastChecker {
       }
       if (this.watchdogCircuitBroken) return;
 
-      const stallMs = now - this.lastPollCycleCompletedAt;
+      const stallMs = this.runningElapsedSince(this.lastPollCycleCompletedAt, now);
       if (stallMs <= STALL_THRESHOLD_MS) return;
 
       // Prune restart history older than the window
@@ -633,6 +663,10 @@ export class FastChecker {
     if (this.pollCycleWatchdog !== null) {
       clearInterval(this.pollCycleWatchdog);
       this.pollCycleWatchdog = null;
+    }
+    if (this.livenessTimer !== null) {
+      clearInterval(this.livenessTimer);
+      this.livenessTimer = null;
     }
     if (this.gmailWatchTimer !== null) {
       clearInterval(this.gmailWatchTimer);
@@ -976,6 +1010,50 @@ export class FastChecker {
    *   2. stdout log unchanged for 30+ min while the agent is "active" (has a
    *      pending message and no idle flag) — passively frozen.
    */
+  /**
+   * Record that the process was scheduled. Any gap since the previous tick that
+   * exceeds LIVENESS_TOLERANCE_MS is banked as time this daemon was not running
+   * (machine suspended, or event loop blocked) and is discounted from every
+   * staleness threshold via runningElapsedSince().
+   *
+   * Safe to call from any timer — the gap is measured between calls, so a
+   * caller that runs more often than LIVENESS_TICK_MS only tightens detection.
+   */
+  private noteLiveness(now: number = Date.now()): void {
+    const previous = this.lastLivenessAt;
+    this.lastLivenessAt = now;
+    if (previous === 0) return;
+    const gap = now - previous;
+    // Clock stepped backwards (NTP correction): re-baseline, bank nothing.
+    if (gap < 0) return;
+    if (gap <= this.LIVENESS_TOLERANCE_MS) return;
+    // Only the portion beyond a normal tick is unscheduled time.
+    this.suspendEvents.push({ endedAt: now, gapMs: gap - this.LIVENESS_TICK_MS });
+    const cutoff = now - this.TURN_WATCHDOG_WINDOW_MS;
+    this.suspendEvents = this.suspendEvents.filter(e => e.endedAt > cutoff);
+    this.log(
+      `Suspend detected: process unscheduled for ${Math.round(gap / 1000)}s ` +
+        `(machine sleep or blocked loop) — discounting it from staleness watchdogs`,
+    );
+  }
+
+  /**
+   * Wall-clock elapsed since `baseline`, minus the time the daemon was not
+   * running. Use for "nothing has happened in N seconds, the agent is stuck"
+   * judgements; use a plain Date.now() delta for cooldowns and grace periods.
+   */
+  private runningElapsedSince(baseline: number, now: number): number {
+    if (baseline <= 0) return 0;
+    let suspended = 0;
+    for (const e of this.suspendEvents) {
+      // Suspended interval is [endedAt - gapMs, endedAt]; count its overlap
+      // with [baseline, now] only.
+      const overlap = Math.min(e.endedAt, now) - Math.max(e.endedAt - e.gapMs, baseline);
+      if (overlap > 0) suspended += overlap;
+    }
+    return Math.max(0, now - baseline - suspended);
+  }
+
   private watchdogCheck(): void {
     const now = Date.now();
     const restartMarker = this.readWatchdogRestartMarker();
@@ -1178,12 +1256,13 @@ export class FastChecker {
     if (this.turnHung) return;
 
     // Signal 2: stdout frozen for 30+ min while agent is active.
+    const stdoutStalledMs = this.runningElapsedSince(this.stdoutLastChangeAt, now);
     if (
       this.lastMessageInjectedAt > 0 &&
-      now - this.stdoutLastChangeAt > this.STDOUT_FROZEN_MS &&
+      stdoutStalledMs > this.STDOUT_FROZEN_MS &&
       this.isAgentActive()
     ) {
-      const stalledSec = Math.round((now - this.stdoutLastChangeAt) / 1000);
+      const stalledSec = Math.round(stdoutStalledMs / 1000);
       this.log(`WATCHDOG: stdout frozen for ${stalledSec}s while active — hard-restarting`);
       this.triggerHardRestart(`frozen: stdout unchanged ${stalledSec}s while active`);
     }
@@ -1303,7 +1382,7 @@ export class FastChecker {
     }
 
     const progressAt = Math.max(lastInjectAt, this.lastMeaningfulOutputAt);
-    const stalledMs = now - progressAt;
+    const stalledMs = this.runningElapsedSince(progressAt, now);
     if (stalledMs <= this.turnWatchdogThresholdMs) {
       this.turnHung = false;
       return;
