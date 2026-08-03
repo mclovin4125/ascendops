@@ -298,6 +298,45 @@ describe('AgentProcess - BUG-011 fix (stop awaits PTY exit)', () => {
     expect(markerWriteOrder).toBeLessThan(stopSpy.mock.invocationCallOrder[0]);
   });
 
+  it('sessionRefresh() defaults the marker reason to session-time-cap rollover when no caller reason is given', async () => {
+    const ap = new AgentProcess('alice', mockEnv, {});
+    await ap.start();
+
+    vi.spyOn(ap, 'stop').mockResolvedValue();
+    vi.spyOn(ap, 'start').mockResolvedValue();
+    fsMocks.writeFileSync.mockReset();
+
+    await ap.sessionRefresh();
+
+    const writeIdx = fsMocks.writeFileSync.mock.calls.findIndex(
+      (call) => String(call[0]).endsWith('.session-refresh'),
+    );
+    expect(String(fsMocks.writeFileSync.mock.calls[writeIdx][1])).toBe('session-time-cap rollover\n');
+  });
+
+  it('sessionRefresh(reason) writes the caller-supplied reason to the marker instead of the hardcoded default', async () => {
+    // Regression test: the marker used to always say 'session-time-cap rollover'
+    // no matter which caller invoked sessionRefresh(), so restarts.log/crashes.log
+    // mislabeled stalled-turn-watchdog and context-force-restart recoveries as
+    // session-time-cap firings.
+    const ap = new AgentProcess('alice', mockEnv, {});
+    await ap.start();
+
+    vi.spyOn(ap, 'stop').mockResolvedValue();
+    vi.spyOn(ap, 'start').mockResolvedValue();
+    fsMocks.writeFileSync.mockReset();
+
+    await ap.sessionRefresh('stalled-turn watchdog recovery: open turn stalled 30min without meaningful printable output');
+
+    const writeIdx = fsMocks.writeFileSync.mock.calls.findIndex(
+      (call) => String(call[0]).endsWith('.session-refresh'),
+    );
+    expect(writeIdx).toBeGreaterThanOrEqual(0);
+    expect(String(fsMocks.writeFileSync.mock.calls[writeIdx][1])).toBe(
+      'stalled-turn watchdog recovery: open turn stalled 30min without meaningful printable output\n',
+    );
+  });
+
   it('sessionRefresh() retries a failed start and records the failure in restarts.log', async () => {
     const ap = new AgentProcess('alice', mockEnv, {});
     await ap.start();
