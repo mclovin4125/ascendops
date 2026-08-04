@@ -12,7 +12,7 @@ import { redactSSN } from '../utils/ssn-redaction.js';
 import { updateHeartbeat, readAllHeartbeats } from '../bus/heartbeat.js';
 import { parseDisplayNameFromIdentity } from '../utils/identity.js';
 import { queryCap } from '../bus/query-cap.js';
-import { selfRestart, hardRestart, autoCommit, checkGoalStaleness, postActivity } from '../bus/system.js';
+import { selfRestart, hardRestart, autoCommit, ensureGitRepoInitialized, checkGoalStaleness, postActivity } from '../bus/system.js';
 import { createExperiment, runExperiment, evaluateExperiment, listExperiments, gatherContext, manageCycle, loadExperimentConfig } from '../bus/experiment.js';
 import { browseCatalog, installCommunityItem, prepareSubmission, submitCommunityItem } from '../bus/catalog.js';
 import { collectMetrics, parseUsageOutput, storeUsageData, checkUpstream, findStrandedBranches, collectTelegramCommands, registerTelegramCommands } from '../bus/metrics.js';
@@ -1048,9 +1048,17 @@ busCommand
   .command('auto-commit')
   .description('Stage safe files for commit (never pushes)')
   .option('--dry-run', 'Show what would be staged without modifying git')
-  .action((opts: { dryRun?: boolean }) => {
+  .option('--dir <path>', 'Target directory instead of the framework root (e.g. an org directory for agent-state snapshots). Initializes a git repo there on first use.')
+  .action((opts: { dryRun?: boolean; dir?: string }) => {
     const env = resolveEnv();
-    const projectDir = env.projectRoot || env.frameworkRoot || process.cwd();
+    const projectDir = opts.dir || env.projectRoot || env.frameworkRoot || process.cwd();
+    if (opts.dir) {
+      // git init is itself non-destructive (idempotent, no commit) so this
+      // runs even under --dry-run — otherwise a first-ever dry-run against a
+      // not-yet-initialized dir misreports 'clean' instead of showing what
+      // would actually be staged once the repo exists.
+      ensureGitRepoInitialized(opts.dir);
+    }
     const report = autoCommit(projectDir, opts.dryRun ?? false);
     // emitResult fails loud (exit 1) if autoCommit ever returns status 'error'/
     // 'conflict'; valid states (clean, nothing_to_stage, dry_run, staged) stay
