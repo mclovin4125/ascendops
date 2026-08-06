@@ -3001,9 +3001,16 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     this.ctxThresholdTriggeredAt = 0;
     this.stdoutLastChangeAt = now;
     this.stdoutLastSize = 0;
-    this.watchdogCircuitBroken = false;
-    this.watchdogRestarts = [];
-    this.watchdogCircuitBrokenAt = 0;
+    // watchdogCircuitBroken/watchdogRestarts/watchdogCircuitBrokenAt are
+    // intentionally NOT reset here. resetWatchdogState() runs on every
+    // transition to "running", including the one immediately following a
+    // watchdog-triggered hard-restart — clearing the restart history here
+    // meant the 3-restarts-in-15min circuit breaker could never accumulate
+    // past 1, since its own restart was wiped by the session bootstrap it
+    // caused. The restart history already self-prunes by age (see the
+    // WATCHDOG_WINDOW_MS filter in the pollCycle watchdog), and the circuit
+    // breaker has its own 30-min-quiet auto-reset — neither needs a manual
+    // clear on session start.
     this.turnHung = false;
     this.turnWatchdogTrackedInjectAt = this.getLastInjectedAt();
     this.turnWatchdogAlertedInjectAt = this.turnWatchdogTrackedInjectAt;
