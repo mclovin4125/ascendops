@@ -148,6 +148,18 @@ export class TelegramAPI {
   }
 
   /**
+   * The bot's numeric id — the part of the token before the colon.
+   *
+   * Safe to log: it is the bot's public identity (it appears in every
+   * getMe response), not the secret half after the colon. Exposed so
+   * multi-poller diagnostics can name WHICH bot a message concerns; with
+   * several pollers in one process, an unattributed error is unactionable.
+   */
+  get botId(): string {
+    return this.baseUrl.slice('https://api.telegram.org/bot'.length).split(':')[0] || 'unknown';
+  }
+
+  /**
    * Convert a Markdown-flavored string to Telegram HTML.
    *
    * Why HTML instead of Markdown v1: Telegram Markdown v1 silently drops

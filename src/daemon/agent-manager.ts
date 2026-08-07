@@ -1119,6 +1119,19 @@ export class AgentManager {
           if (consecutiveConflictStart === null) consecutiveConflictStart = Date.now();
           if (Date.now() - consecutiveConflictStart > MAX_CONSECUTIVE_CONFLICT_MS) {
             log(`Telegram poller for ${name} could not clear Conflict within 5min of consecutive failures — giving up. Inspect for duplicate bot instance.`);
+            // Giving up means this agent silently loses ALL inbound Telegram
+            // for the life of the daemon — the same silence the swallowed
+            // Conflict produced. A log line alone is not enough; alert the
+            // operator chat. Outbound is unaffected by a getUpdates conflict,
+            // so this send still reaches them on the very bot that is stuck.
+            if (telegramApi && chatId) {
+              telegramApi.sendMessage(
+                String(chatId),
+                `${name}: Telegram inbound is DOWN — another process holds this bot's getUpdates lock ` +
+                `(bot ${telegramApi.botId}) and it did not clear in 5min. Outbound still works. ` +
+                `Find the duplicate instance, or revoke and reissue this bot's token in @BotFather.`,
+              ).catch(() => { /* swallow alert failure; the log above already captured it */ });
+            }
             return;
           }
           log(`Telegram poller for ${name} exited (${poller.lastExitReason}). Sleeping 30s then restarting to retake getUpdates lock.`);
