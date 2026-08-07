@@ -93,6 +93,20 @@ export function hardRestart(paths: BusPaths, agentName: string, reason?: string)
 }
 
 /**
+ * Ensure `dir` is a git repository, initializing one if it is not.
+ *
+ * Used to bootstrap a dedicated repo for org/agent-state snapshots (see
+ * autoCommit's --dir option) on first run, so the daily cron self-heals
+ * instead of silently no-opping against a directory with no git history.
+ * Idempotent — safe to call on every invocation.
+ */
+export function ensureGitRepoInitialized(dir: string): void {
+  ensureDir(dir);
+  if (existsSync(join(dir, '.git'))) return;
+  execFileSync('git', ['init', '--initial-branch=main'], { cwd: dir, stdio: 'pipe' });
+}
+
+/**
  * Auto-commit safe files in a project directory.
  * Filters out dangerous files (credentials, env, large, binary).
  * Never pushes. Mirrors bash bus/auto-commit.sh.

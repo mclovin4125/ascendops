@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { execSync } from 'child_process';
-import { selfRestart, hardRestart, autoCommit, checkGoalStaleness, postActivity } from '../../../src/bus/system';
+import { selfRestart, hardRestart, autoCommit, ensureGitRepoInitialized, checkGoalStaleness, postActivity } from '../../../src/bus/system';
 import type { BusPaths } from '../../../src/types';
 
 function makePaths(testDir: string, agent: string = 'test-agent'): BusPaths {
@@ -77,6 +77,49 @@ describe('Bus System', () => {
       hardRestart(paths, 'test-agent');
       const logContent = readFileSync(join(paths.logDir, 'restarts.log'), 'utf-8');
       expect(logContent).toContain('HARD-RESTART: no reason specified');
+    });
+  });
+
+  describe('ensureGitRepoInitialized', () => {
+    it('initializes a git repo when none exists', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'cortextos-ensure-git-test-'));
+      try {
+        expect(existsSync(join(dir, '.git'))).toBe(false);
+        ensureGitRepoInitialized(dir);
+        expect(existsSync(join(dir, '.git'))).toBe(true);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('is idempotent — does not error or reinitialize an existing repo', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'cortextos-ensure-git-test-'));
+      try {
+        ensureGitRepoInitialized(dir);
+        execSync('git config user.email "test@test.com"', { cwd: dir, stdio: 'pipe' });
+        execSync('git config user.name "Test"', { cwd: dir, stdio: 'pipe' });
+        writeFileSync(join(dir, 'file.txt'), 'content');
+        execSync('git add file.txt && git commit -m "first"', { cwd: dir, stdio: 'pipe' });
+
+        expect(() => ensureGitRepoInitialized(dir)).not.toThrow();
+
+        // History is untouched by the second call.
+        const log = execSync('git log --oneline', { cwd: dir, encoding: 'utf-8' });
+        expect(log.trim().split('\n')).toHaveLength(1);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('creates the target directory if it does not exist yet', () => {
+      const parent = mkdtempSync(join(tmpdir(), 'cortextos-ensure-git-test-'));
+      const nested = join(parent, 'not-yet-created');
+      try {
+        ensureGitRepoInitialized(nested);
+        expect(existsSync(join(nested, '.git'))).toBe(true);
+      } finally {
+        rmSync(parent, { recursive: true, force: true });
+      }
     });
   });
 
