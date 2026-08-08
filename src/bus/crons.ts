@@ -20,6 +20,7 @@ import type { CronDefinition, CronExecutionLogEntry } from '../types/index.js';
 import { CRONS_DIRECTORY, CRONS_FILENAME, cronExecutionLogPathFor } from './crons-schema.js';
 import { atomicWriteSync } from '../utils/atomic.js';
 import { withFileLockSync } from '../utils/lock.js';
+import { resolveCanonicalCtxRoot } from '../utils/paths.js';
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -34,12 +35,21 @@ interface CronsFile {
 /**
  * Resolve the absolute path to an agent's crons.json.
  *
- * Uses CTX_ROOT env var when available (production), otherwise falls back to
- * a path relative to process.cwd() so tests can supply their own root via
- * process.env.CTX_ROOT pointing to a tempdir.
+ * Uses CTX_ROOT env var when available (production; also how tests supply
+ * their own root via process.env.CTX_ROOT pointing to a tempdir). When unset,
+ * falls back to the same canonical default every other path resolver in the
+ * codebase uses (~/.cortextos/{instance}) — NOT process.cwd().
+ *
+ * Confirmed 2026-08-07: the previous process.cwd() fallback meant a shell
+ * with no CTX_ROOT exported (e.g. an operator's interactive terminal, or any
+ * script invoked outside an agent's own session context) silently resolved
+ * to the wrong directory. readCrons() then found no file there and returned
+ * [] exactly like a genuinely empty cron list, so `list-crons` printed "No
+ * crons configured" for an agent that actually had crons loaded and firing —
+ * a missing-context condition misreported as a missing-data one.
  */
 function cronsFilePath(agentName: string): string {
-  const ctxRoot = process.env.CTX_ROOT ?? process.cwd();
+  const ctxRoot = process.env.CTX_ROOT ?? resolveCanonicalCtxRoot();
   return join(ctxRoot, CRONS_DIRECTORY, agentName, CRONS_FILENAME);
 }
 
