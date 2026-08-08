@@ -22,9 +22,28 @@ function loadRentVineAuth(): RentVineAuth {
   const apiSecret = fileVars.RENTVINE_API_SECRET || process.env.RENTVINE_API_SECRET;
 
   if (!accountCode || !apiKey || !apiSecret) {
+    // env.agentDir only resolves when the shell carries agent context (CTX_AGENT_DIR
+    // directly, or enough of CTX_ORG/CTX_PROJECT_ROOT/CORTEXTOS_DIR to derive it — see
+    // resolveEnv in utils/env.ts). A shell with none of that (an operator's plain
+    // terminal, or any script invoked outside an agent's own session) resolves
+    // agentDir to '', so the .env read above is silently skipped. Confirmed
+    // 2026-08-07: that read identically to a genuinely missing/incomplete .env file
+    // — "RentVine credentials missing" — even when the credentials are present and
+    // valid on disk, because the command was never looking in the right place. Name
+    // that distinction rather than reporting a plain data-missing error in both cases.
+    if (!env.agentDir) {
+      throw new Error(
+        'RentVine credentials missing, AND no agent directory could be resolved for this shell ' +
+        '(no CTX_AGENT_DIR, and not enough of CTX_ORG/CTX_PROJECT_ROOT to derive one) — an agent ' +
+        '.env file was never checked. Run this from an agent session context (or export ' +
+        'CTX_AGENT_NAME, CTX_ORG, and CTX_ROOT/CORTEXTOS_DIR) before concluding credentials are ' +
+        'actually missing, or set RENTVINE_ACCOUNT_CODE, RENTVINE_API_KEY, and RENTVINE_API_SECRET ' +
+        'directly in the environment.',
+      );
+    }
     throw new Error(
-      'RentVine credentials missing. Set RENTVINE_ACCOUNT_CODE, RENTVINE_API_KEY, and ' +
-      'RENTVINE_API_SECRET in your agent .env file.',
+      `RentVine credentials missing from ${env.agentDir}/.env. Set RENTVINE_ACCOUNT_CODE, ` +
+      'RENTVINE_API_KEY, and RENTVINE_API_SECRET in your agent .env file.',
     );
   }
 
