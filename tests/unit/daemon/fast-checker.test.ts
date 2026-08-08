@@ -2085,6 +2085,63 @@ describe('FastChecker', () => {
       expect(agent.hardRestartSelf).not.toHaveBeenCalled();
     });
 
+    it('does not lose meaningful output buried before the trailing cap on an oversized delta (2026-08-08)', () => {
+      // Regression test for the stalled-turn watchdog delta-cap gap found while
+      // investigating the 2026-08-08 fleet-wide HUNG pattern. The old
+      // trackMeaningfulOutput jumped stdoutMeaningfulOffset straight to `size`
+      // after sampling only the trailing MAX_MEANINGFUL_STDOUT_DELTA_BYTES of an
+      // oversized delta — so a real, unique line sitting just past the old
+      // offset (i.e. NOT in that trailing window) was permanently skipped: never
+      // read on this call, and never reachable on a later one either, since the
+      // offset had already moved past it. Put the real line immediately after
+      // the baseline and pad the rest of a single >256KB delta with spinner-only
+      // filler (stripped to nothing by meaningfulPrintableLines) so the trailing
+      // window alone would find no new fingerprint.
+      const stdoutPath = join(paths.logDir, 'stdout.log');
+      const agent = makeAgentWithDir(join(testDir, 'agent-meaningful-output-oversized-delta'));
+      const checker = new FastChecker(agent, paths, '/framework') as any;
+      checker.bootstrappedAt = Date.now() - checker.BOOTSTRAP_GRACE_MS - 1;
+
+      const baseline = 'startup output';
+      writeFileSync(stdoutPath, baseline, 'utf-8');
+      checker.watchdogCheck(); // establishes the baseline offset, no scan yet
+
+      const realLine = 'Real tool output line — genuinely new';
+      const spinnerFiller = '⠋ '.repeat(140_000); // > 256KB, strips to nothing
+      writeFileSync(stdoutPath, `${baseline}\n${realLine}\n${spinnerFiller}`, 'utf-8');
+      checker.watchdogCheck();
+
+      expect(checker.lastMeaningfulOutputAt).toBeGreaterThan(0);
+    });
+
+    it('catches up an oversized delta over successive ticks instead of losing the untouched middle', () => {
+      // Same root cause as above, exercised directly against trackMeaningfulOutput
+      // to confirm the offset now advances by exactly what was read (bounded
+      // catch-up) rather than jumping to the full new size in one call.
+      const stdoutPath = join(paths.logDir, 'stdout.log');
+      const agent = makeAgentWithDir(join(testDir, 'agent-meaningful-output-catchup'));
+      const checker = new FastChecker(agent, paths, '/framework') as any;
+
+      // Prime the baseline at offset 0 first — trackMeaningfulOutput treats a
+      // fresh checker's very first call as its baseline (stdoutMeaningfulOffset
+      // starts at -1) and returns without reading, same priming every real
+      // session already has by the time a large delta shows up.
+      writeFileSync(stdoutPath, '', 'utf-8');
+      checker.trackMeaningfulOutput(stdoutPath, 0, Date.now());
+      expect(checker.stdoutMeaningfulOffset).toBe(0);
+
+      const cap = 256 * 1024;
+      const filler = 'y'.repeat(cap + 5_000); // one cap's worth plus a remainder chunk
+      writeFileSync(stdoutPath, filler, 'utf-8');
+      const size = statSync(stdoutPath).size;
+
+      checker.trackMeaningfulOutput(stdoutPath, size, Date.now());
+      expect(checker.stdoutMeaningfulOffset).toBe(cap); // advanced by the cap, not to `size`
+
+      checker.trackMeaningfulOutput(stdoutPath, size, Date.now());
+      expect(checker.stdoutMeaningfulOffset).toBe(size); // second tick finishes the catch-up
+    });
+
     it('does not persist marker or notify when hard restart is rejected by stopped status', () => {
       const telegram = createMockTelegramApi();
       const agent = makeAgentWithDir(join(testDir, 'agent-stopped'));
