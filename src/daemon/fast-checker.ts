@@ -1323,16 +1323,28 @@ export class FastChecker {
     }
     if (size === this.stdoutMeaningfulOffset) return;
 
+    // Read forward from the last checkpoint, capped at MAX_MEANINGFUL_STDOUT_DELTA_BYTES
+    // per call. The offset advances by exactly what was read — NOT to `size` — so an
+    // oversized delta is caught up over the next few pollCycle ticks instead of losing
+    // everything before the trailing cap permanently. The previous version jumped
+    // stdoutMeaningfulOffset straight to `size` after sampling only the final
+    // maxBytes-sized tail, so any meaningful content strictly between the old offset
+    // and that tail was never fingerprinted, on this call or any later one — the
+    // offset had already moved past it. A large legitimate burst (e.g. a colorized
+    // progress bar or a big diff dump) whose trailing tail happened to be mostly
+    // ANSI/spinner noise could then register as zero new meaningful output despite
+    // being real, active progress, which is exactly the false read the stalled-turn
+    // watchdog (checkStalledTurn) uses this signal to avoid. At the default 1s
+    // pollCycle interval, 256KB/tick comfortably outpaces realistic PTY throughput,
+    // so catch-up is normally one extra tick, not a growing backlog.
     const bytes = size - this.stdoutMeaningfulOffset;
     const readLength = Math.min(bytes, MAX_MEANINGFUL_STDOUT_DELTA_BYTES);
-    const readPosition = bytes > MAX_MEANINGFUL_STDOUT_DELTA_BYTES
-      ? size - readLength
-      : this.stdoutMeaningfulOffset;
-    this.stdoutMeaningfulOffset = size;
+    const readPosition = this.stdoutMeaningfulOffset;
+    this.stdoutMeaningfulOffset = readPosition + readLength;
 
     try {
       if (bytes > MAX_MEANINGFUL_STDOUT_DELTA_BYTES) {
-        this.log(`WATCHDOG: stdout delta ${bytes}B exceeds cap; sampling tail`);
+        this.log(`WATCHDOG: stdout delta ${bytes}B exceeds cap; catching up ${readLength}B/tick`);
       }
       const buf = readFileRangeSync(stdoutPath, readPosition, readLength, this.fileRangeOps);
 
