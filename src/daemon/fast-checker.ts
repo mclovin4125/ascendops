@@ -508,20 +508,25 @@ export class FastChecker {
         return;
       }
       const ts = new Date().toISOString();
-      execFile(
-        'cortextos',
-        ['bus', 'update-heartbeat', `[watchdog] ${agentName} alive — idle session ${ts}`],
-        { timeout: 10_000 },
-        (err) => {
-          if (!err) return;
-          const e = err as NodeJS.ErrnoException & { killed?: boolean };
-          if (e.killed) {
-            this.log(`Heartbeat watchdog timed out (10s) — cortextos CLI did not return`);
-          } else {
-            this.log(`Heartbeat watchdog error: ${err.message}`);
-          }
-        },
-      );
+      // Call updateHeartbeat() in-process with this.paths/agentName — already
+      // resolved correctly for the specific agent this checker tracks — rather
+      // than shelling out to `cortextos bus update-heartbeat`. Confirmed
+      // 2026-08-09: that subprocess inherits the DAEMON's own ambient env/cwd,
+      // not this agent's context, so resolveEnv() inside it resolved agent and
+      // org independently (falling back to basename(cwd) / '') and silently
+      // wrote the liveness ping under the wrong identity — observed landing
+      // under agent "ascendops"/org "" instead of the real agent. Every
+      // subsequent misattributed write from any agent's own 50min timer then
+      // clobbers that same wrong record, masking this heartbeat mechanism's
+      // per-agent staleness signal entirely. Same fix pattern already used by
+      // handleStalledTurn's heartbeat annotation below.
+      try {
+        updateHeartbeat(this.paths, agentName, `[watchdog] ${agentName} alive — idle session ${ts}`, {
+          org: process.env.CTX_ORG ?? '',
+        });
+      } catch (err) {
+        this.log(`Heartbeat watchdog error: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }, HEARTBEAT_INTERVAL_MS);
 
     // Poll-cycle watchdog: if pollCycle hasn't completed in 90s, force-restart
@@ -753,27 +758,23 @@ export class FastChecker {
     const next = loadHookRegistry(orgPath);
     this.hookRegistry = next;
     const enabledCount = next.hooks.filter((h) => h.enabled).length;
-    // Best-effort observability event: schema_version + counts + reason
-    execFile(
-      'cortextos',
-      [
-        'bus',
-        'log-event',
-        'action',
-        'hooks_registry_loaded',
-        'info',
-        '--meta',
-        JSON.stringify({
-          source_path: this.hookRegistryPath,
-          hook_count: next.hooks.length,
-          enabled_count: enabledCount,
-          schema_version: next.schema_version,
-          reason,
-        }),
-      ],
-      { timeout: 5_000 },
-      () => { /* fire-and-forget */ },
-    );
+    // Best-effort observability event: schema_version + counts + reason.
+    // Calls logEvent() in-process rather than shelling out to
+    // `cortextos bus log-event` — see the same fix note on the idle-session
+    // heartbeat watchdog above; a subprocess spawned without an explicit env
+    // resolves agent/org from the daemon's own ambient context, not this
+    // checker's, and silently misattributes the event.
+    try {
+      logEvent(this.paths, this.agent.name, process.env.CTX_ORG ?? '', 'action', 'hooks_registry_loaded', 'info', {
+        source_path: this.hookRegistryPath,
+        hook_count: next.hooks.length,
+        enabled_count: enabledCount,
+        schema_version: next.schema_version,
+        reason,
+      });
+    } catch (err) {
+      this.log(`hooks_registry_loaded event log failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   private computeEventLogPath(): string {

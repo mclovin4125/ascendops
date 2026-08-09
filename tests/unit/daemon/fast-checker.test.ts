@@ -947,7 +947,21 @@ describe('FastChecker', () => {
     beforeEach(() => { vi.useFakeTimers(); });
     afterEach(() => { vi.useRealTimers(); vi.clearAllMocks(); });
 
-    it('fires exec after bootstrap at 50-min interval (onboarded)', async () => {
+    // Reads the real heartbeat.json this suite's paths.stateDir points at.
+    // The idle-session watchdog writes via updateHeartbeat() in-process (fixed
+    // 2026-08-09 — was a subprocess `cortextos bus update-heartbeat` call that
+    // inherited the daemon's own ambient env/cwd instead of this agent's
+    // context, and silently misattributed the write to the wrong agent/org),
+    // so these tests assert on the real file rather than an execFile mock.
+    function readHeartbeatStatus(): string | undefined {
+      try {
+        return JSON.parse(readFileSync(join(paths.stateDir, 'heartbeat.json'), 'utf-8')).status;
+      } catch {
+        return undefined;
+      }
+    }
+
+    it('writes a liveness heartbeat after bootstrap at 50-min interval (onboarded)', async () => {
       // The watchdog is gated on the .onboarded marker (fire-time): it only mints a
       // liveness heartbeat for an onboarded agent. Mark onboarded for the fire cases.
       writeFileSync(join(paths.stateDir, '.onboarded'), '');
@@ -955,50 +969,38 @@ describe('FastChecker', () => {
       const checker = new FastChecker(agent, paths, '/tmp/framework');
       checker.start();
       await vi.advanceTimersByTimeAsync(50 * 60 * 1000);
-      expect(execFile).toHaveBeenCalledWith(
-        'cortextos',
-        expect.arrayContaining(['bus', 'update-heartbeat', expect.stringContaining('[watchdog] my-agent alive — idle session')]),
-        expect.objectContaining({ timeout: 10_000 }),
-        expect.any(Function),
-      );
+      expect(readHeartbeatStatus()).toContain('[watchdog] my-agent alive — idle session');
       checker.stop();
       checker.wake();
     });
 
     it('suppresses the false alive heartbeat while a turn is marked HUNG', async () => {
       writeFileSync(join(paths.stateDir, '.onboarded'), '');
-      const execMock = vi.mocked(execFile);
       const agent = createMockAgent('my-agent');
       const checker = new FastChecker(agent, paths, '/tmp/framework') as any;
       checker.start();
       await vi.advanceTimersByTimeAsync(1);
       checker.turnHung = true;
-      execMock.mockClear();
 
       await vi.advanceTimersByTimeAsync(50 * 60 * 1000);
 
-      const aliveCalls = execMock.mock.calls.filter(
-        (call) => Array.isArray(call[1]) && (call[1] as string[]).some((arg) => arg.includes('alive')),
-      );
-      expect(aliveCalls).toHaveLength(0);
+      expect(readHeartbeatStatus() ?? '').not.toContain('alive');
       checker.stop();
       checker.wake();
     });
 
-    it('clears timer on stop - no further exec calls after stop (onboarded)', async () => {
+    it('clears timer on stop - no further heartbeat writes after stop (onboarded)', async () => {
       writeFileSync(join(paths.stateDir, '.onboarded'), '');
-      const { execFile } = await import('child_process');
-      const execMock = execFile as ReturnType<typeof vi.fn>;
       const agent = createMockAgent('my-agent');
       const checker = new FastChecker(agent, paths, '/tmp/framework');
       checker.start();
       await vi.advanceTimersByTimeAsync(50 * 60 * 1000);
-      const callsBefore = execMock.mock.calls.length;
-      expect(callsBefore).toBeGreaterThan(0);
+      const statusAfterFirstTick = readHeartbeatStatus();
+      expect(statusAfterFirstTick).toContain('alive');
       checker.stop();
       checker.wake();
       await vi.advanceTimersByTimeAsync(50 * 60 * 1000);
-      expect(execMock.mock.calls.length).toBe(callsBefore);
+      expect(readHeartbeatStatus()).toBe(statusAfterFirstTick);
     });
 
     it('does not fire before bootstrap completes', async () => {
@@ -1016,26 +1018,17 @@ describe('FastChecker', () => {
       checker.wake();
     });
 
-    // Helper: count watchdog update-heartbeat execFile calls.
-    function watchdogCallCount(execMock: ReturnType<typeof vi.fn>): number {
-      return execMock.mock.calls.filter(
-        (c) => Array.isArray(c[1]) && c[1].some((a: unknown) => typeof a === 'string' && a.includes('[watchdog]')),
-      ).length;
-    }
-
     // Fire-time onboarding gate: an un-onboarded agent (no .onboarded marker) must NOT
     // mint a watchdog heartbeat. heartbeat.json existing pre-completion satisfies the
     // daemon retro-write trigger (agent-process.ts existsSync(heartbeatPath)) and the
     // agent gets marked onboarded WITHOUT its role crons. NEGATIVE-CONTROL: removing the
     // existsSync(.onboarded) guard in fast-checker makes this test go red.
     it('SKIPS the heartbeat while .onboarded is absent (un-onboarded agent)', async () => {
-      const { execFile } = await import('child_process');
-      const execMock = execFile as ReturnType<typeof vi.fn>;
       const agent = createMockAgent('my-agent'); // no .onboarded marker, as during onboarding
       const checker = new FastChecker(agent, paths, '/tmp/framework');
       checker.start();
       await vi.advanceTimersByTimeAsync(3 * 50 * 60 * 1000); // three watchdog ticks
-      expect(watchdogCallCount(execMock)).toBe(0); // never minted a heartbeat pre-onboarding
+      expect(existsSync(join(paths.stateDir, 'heartbeat.json'))).toBe(false); // never minted a heartbeat pre-onboarding
       checker.stop();
       checker.wake();
       // 30s: this advances 150 simulated minutes in one call — by far the
@@ -1048,18 +1041,39 @@ describe('FastChecker', () => {
     // Fire-time, not arm-time: the gate re-evaluates each tick, so a session that finishes
     // onboarding then goes quiet still gets liveness without a restart.
     it('auto-resumes the heartbeat once .onboarded appears mid-session', async () => {
-      const { execFile } = await import('child_process');
-      const execMock = execFile as ReturnType<typeof vi.fn>;
       const agent = createMockAgent('my-agent');
       const checker = new FastChecker(agent, paths, '/tmp/framework');
       checker.start();
       await vi.advanceTimersByTimeAsync(50 * 60 * 1000); // tick 1: un-onboarded -> skipped
-      expect(watchdogCallCount(execMock)).toBe(0);
+      expect(existsSync(join(paths.stateDir, 'heartbeat.json'))).toBe(false);
       writeFileSync(join(paths.stateDir, '.onboarded'), ''); // onboarding completes between ticks
       await vi.advanceTimersByTimeAsync(50 * 60 * 1000); // tick 2: gate re-evaluates -> fires
-      expect(watchdogCallCount(execMock)).toBe(1);
+      expect(readHeartbeatStatus()).toContain('[watchdog] my-agent alive — idle session');
       checker.stop();
       checker.wake();
+    });
+  });
+
+  describe('loadAndAnnounceRegistry — hooks_registry_loaded event attribution (2026-08-09)', () => {
+    it('logs the event in-process under the tracked agent, not a subprocess under the wrong identity', () => {
+      // Same root cause as the heartbeat watchdog fix above: this used to shell
+      // out to `cortextos bus log-event`, which resolves agent/org from the
+      // daemon's own ambient env rather than this checker's — logEvent() now
+      // runs in-process with paths/agent.name already correctly resolved.
+      const agent = createMockAgent('my-agent');
+      const checker = new FastChecker(agent, paths, '/tmp/framework') as any;
+
+      checker.loadAndAnnounceRegistry(join(testDir, 'no-hooks-json-here'), 'startup');
+
+      const today = new Date().toISOString().split('T')[0];
+      const eventLine = readFileSync(
+        join(paths.analyticsDir, 'events', 'my-agent', `${today}.jsonl`),
+        'utf-8',
+      ).trim();
+      const event = JSON.parse(eventLine);
+      expect(event.agent).toBe('my-agent');
+      expect(event.event).toBe('hooks_registry_loaded');
+      expect(event.metadata.hook_count).toBe(0); // no hooks.json at that path -> EMPTY_REGISTRY
     });
   });
 
