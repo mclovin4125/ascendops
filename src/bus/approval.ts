@@ -239,12 +239,30 @@ export async function createApproval(
 /**
  * Update an approval's status (approve or deny).
  * Notifies the requesting agent via inbox message.
+ *
+ * `resolvedByAgent` (optional) identifies who is calling this — pass it from
+ * a CLI/library caller that has a real agent identity to enforce (see below).
+ * Leave it undefined for callers that already carry their own, independent
+ * authorization (the daemon's Telegram activity-channel callback checks the
+ * inbound Telegram user against an allow-list before ever calling this; the
+ * dashboard's API route always resolves as agent name "dashboard", which
+ * cannot equal a real requesting_agent) — those paths are not a bare agent
+ * self-service call and should not be gated by this check.
+ *
+ * Confirmed 2026-08-10: an agent could satisfy an --approved-by gate (e.g.
+ * sendSms, sendRentVineChatMessage) by calling `create-approval` and
+ * `update-approval` on its own request back-to-back, from its own session,
+ * with nothing stopping it — defeating the entire point of a Tier 3 human
+ * check. This closes that hole for the plain CLI path: an agent's own
+ * session cannot resolve its own approval, because the CLI always passes
+ * its own agent identity here.
  */
 export function updateApproval(
   paths: BusPaths,
   approvalId: string,
   status: ApprovalStatus,
   note?: string,
+  resolvedByAgent?: string,
 ): void {
   // Scrub the resolution note before it is persisted into resolved_by (at-rest
   // JSON) and before it goes into the decision notification below. Sibling of
@@ -253,31 +271,44 @@ export function updateApproval(
   const pendingDir = join(paths.approvalDir, 'pending');
   const filePath = join(pendingDir, `${approvalId}.json`);
 
+  // Read + parse in its own try/catch so a genuinely missing/corrupt file
+  // reports "not found" — the self-resolution check below must NOT get
+  // caught and rewrapped into that same misleading message.
+  let approval: Approval;
   try {
     const content = readFileSync(filePath, 'utf-8');
-    const approval: Approval = JSON.parse(content);
-    approval.status = status;
-    approval.updated_at = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
-    approval.resolved_at = approval.updated_at;
-    approval.resolved_by = note || null;
-
-    // Move to resolved/ directory (matches bash version)
-    const destDir = join(paths.approvalDir, 'resolved');
-    ensureDir(destDir);
-    atomicWriteSync(join(destDir, `${approvalId}.json`), JSON.stringify(approval));
-
-    // Remove from pending
-    const { unlinkSync } = require('fs');
-    unlinkSync(filePath);
-
-    // Notify requesting agent via inbox
-    if (approval.requesting_agent) {
-      const noteText = note ? ` Note: ${note}` : '';
-      const msg = `Approval decision: ${status.toUpperCase()}\napproval_id: ${approvalId}\ndecision: ${status}${noteText}`;
-      sendMessage(paths, 'system', approval.requesting_agent, 'urgent', msg);
-    }
+    approval = JSON.parse(content);
   } catch (err) {
     throw new Error(`Approval ${approvalId} not found: ${err}`);
+  }
+
+  if (resolvedByAgent && resolvedByAgent === approval.requesting_agent) {
+    throw new Error(
+      `approval ${approvalId} cannot be resolved by ${resolvedByAgent} — it is the same agent ` +
+      'that requested it. Approvals must be resolved by Mack (via Telegram or the dashboard), ' +
+      'not self-granted by the requesting agent.',
+    );
+  }
+
+  approval.status = status;
+  approval.updated_at = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+  approval.resolved_at = approval.updated_at;
+  approval.resolved_by = note || null;
+
+  // Move to resolved/ directory (matches bash version)
+  const destDir = join(paths.approvalDir, 'resolved');
+  ensureDir(destDir);
+  atomicWriteSync(join(destDir, `${approvalId}.json`), JSON.stringify(approval));
+
+  // Remove from pending
+  const { unlinkSync } = require('fs');
+  unlinkSync(filePath);
+
+  // Notify requesting agent via inbox
+  if (approval.requesting_agent) {
+    const noteText = note ? ` Note: ${note}` : '';
+    const msg = `Approval decision: ${status.toUpperCase()}\napproval_id: ${approvalId}\ndecision: ${status}${noteText}`;
+    sendMessage(paths, 'system', approval.requesting_agent, 'urgent', msg);
   }
 }
 

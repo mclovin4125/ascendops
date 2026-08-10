@@ -433,6 +433,37 @@ describe('updateApproval (regression guard for activity-channel callback path)',
   });
 });
 
+describe('updateApproval — self-resolution gap (2026-08-10 incident)', () => {
+  // maintenance-director created an external-comms approval AND approved it
+  // itself, in the same session, satisfying a --approved-by gate with
+  // nothing else checking who resolved it. resolvedByAgent closes this for
+  // any caller that passes it (the CLI always does).
+  it('refuses when resolvedByAgent matches the approval\'s own requesting_agent', async () => {
+    const id = await createApproval(paths, 'maintenance-director', 'TestOrg', 'Send WO chat message', 'external-comms', undefined, frameworkRoot);
+
+    expect(() => updateApproval(paths, id, 'approved', undefined, 'maintenance-director'))
+      .toThrow(/cannot be resolved by maintenance-director.*same agent/);
+
+    // Must not have moved — a refused resolution leaves the approval pending.
+    expect(existsSync(join(paths.approvalDir, 'pending', `${id}.json`))).toBe(true);
+    expect(existsSync(join(paths.approvalDir, 'resolved', `${id}.json`))).toBe(false);
+  });
+
+  it('allows resolution when resolvedByAgent differs from requesting_agent (dashboard, another agent)', async () => {
+    const id = await createApproval(paths, 'maintenance-director', 'TestOrg', 'Send WO chat message', 'external-comms', undefined, frameworkRoot);
+
+    expect(() => updateApproval(paths, id, 'approved', undefined, 'dashboard')).not.toThrow();
+    expect(existsSync(join(paths.approvalDir, 'resolved', `${id}.json`))).toBe(true);
+  });
+
+  it('allows resolution when resolvedByAgent is omitted entirely (daemon Telegram-callback path, which has its own allow-list check)', async () => {
+    const id = await createApproval(paths, 'maintenance-director', 'TestOrg', 'Send WO chat message', 'external-comms', undefined, frameworkRoot);
+
+    expect(() => updateApproval(paths, id, 'approved', 'via Telegram activity channel by Mack (@mack)')).not.toThrow();
+    expect(existsSync(join(paths.approvalDir, 'resolved', `${id}.json`))).toBe(true);
+  });
+});
+
 describe('listPendingApprovals', () => {
   it('returns only approvals still in pending/ (not resolved)', async () => {
     const id1 = await createApproval(paths, 'alice', 'TestOrg', 'Still pending', 'deployment', undefined, frameworkRoot);

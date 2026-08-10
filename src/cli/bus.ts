@@ -1639,7 +1639,11 @@ busCommand
     }
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
-    updateApproval(paths, id, status as ApprovalStatus, note);
+    // Pass the calling agent's own identity so updateApproval can refuse a
+    // self-resolution (an agent approving its own request) — see the
+    // resolvedByAgent doc comment on updateApproval for why this is needed
+    // here but not on the daemon's Telegram-callback / dashboard paths.
+    updateApproval(paths, id, status as ApprovalStatus, note, env.agentName);
     console.log(`Approval ${id} -> ${status}`);
   });
 
