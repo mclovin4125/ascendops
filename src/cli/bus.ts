@@ -2282,7 +2282,7 @@ busCommand
   .option('--format <fmt>', 'Output format: json|text', 'json')
   .option('--all-orgs', 'Scan all orgs under CTX_ROOT (matches dashboard view)', false)
   .option('--stale', 'Only show approvals pending past the staleness threshold', false)
-  .option('--stale-hours <n>', 'Staleness threshold in hours (default: 4, one heartbeat cycle)', '4')
+  .option('--stale-hours <n>', 'Staleness threshold in hours (default: 3 — intentionally below the 4h heartbeat cadence so a fire never silently misses a cycle, see DEFAULT_APPROVAL_STALE_MS)', '3')
   .action((opts: { format?: string; allOrgs?: boolean; stale?: boolean; staleHours?: string }) => {
     const { listPendingApprovals, isApprovalStale } = require('../bus/approval.js');
     const { readdirSync, existsSync } = require('fs');
@@ -2310,7 +2310,7 @@ busCommand
       approvals = listPendingApprovals(paths);
     }
 
-    const staleThresholdMs = (parseFloat(opts.staleHours ?? '4') || 4) * 60 * 60 * 1000;
+    const staleThresholdMs = (parseFloat(opts.staleHours ?? '3') || 3) * 60 * 60 * 1000;
     const now = Date.now();
     approvals = (approvals as Array<{ created_at: string }>).map((a) => ({
       ...a,

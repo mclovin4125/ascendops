@@ -18,7 +18,7 @@ describe('isApprovalStale', () => {
 
   it('is true when created_at is past the threshold', () => {
     const now = Date.parse('2026-07-29T12:00:00Z');
-    const old = '2026-07-29T07:00:00Z'; // 5h ago, past the 4h default
+    const old = '2026-07-29T07:00:00Z'; // 5h ago, past the 3h default
     expect(isApprovalStale({ created_at: old }, DEFAULT_APPROVAL_STALE_MS, now)).toBe(true);
   });
 

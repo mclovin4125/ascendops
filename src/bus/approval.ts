@@ -281,8 +281,22 @@ export function updateApproval(
   }
 }
 
-/** Default: flag a pending approval unresolved for 4h+ (one heartbeat cycle at the default interval). */
-export const DEFAULT_APPROVAL_STALE_MS = 4 * 60 * 60 * 1000;
+/**
+ * Default: flag a pending approval unresolved for 3h+.
+ *
+ * Deliberately set BELOW the default 4h heartbeat cadence, not equal to it.
+ * heartbeat/SKILL.md's approval sweep runs this check on every fire; if the
+ * threshold equalled the interval, an approval created shortly after a fire
+ * would still be under 4h old at the very next fire (which lands just under
+ * 4h later) and would silently miss that cycle, not getting flagged until
+ * the fire AFTER that — up to ~8h stale before anyone is told, double the
+ * intended SLA. At 3h, the gap between an approval's creation and the next
+ * heartbeat fire (always < 4h) is guaranteed to exceed the threshold, so it
+ * is caught on the very first eligible cycle even with cron-fire jitter.
+ * Confirmed as the mechanism behind "2h/4h reminder steps silently slip
+ * between 4h-spaced heartbeat fires" (2026-08-09 goal).
+ */
+export const DEFAULT_APPROVAL_STALE_MS = 3 * 60 * 60 * 1000;
 
 /**
  * True when a pending approval's created_at is at least thresholdMs old.
