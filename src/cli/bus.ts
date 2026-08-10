@@ -1437,6 +1437,67 @@ busCommand
   });
 
 busCommand
+  .command('rentvine-chat-read')
+  .description('Read a RentVine work-order chat thread (GET /chat/messages). Read-only. NOTE: RentVine marks retrieved messages read by the manager role as a side effect.')
+  .argument('<work-order-id>', 'Internal RentVine workOrderID, NOT the display number (e.g. 58, not #100058)')
+  .action(async (workOrderId: string) => {
+    const { getRentVineChatMessages } = await import('../bus/rentvine.js');
+    try {
+      console.log(JSON.stringify(await getRentVineChatMessages(workOrderId), null, 2));
+    } catch (err) {
+      console.error(`Failed to read RentVine chat: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+busCommand
+  .command('rentvine-chat-send')
+  .description('Post a message into a RentVine work-order chat thread, visible to whichever parties you flag. Safe-by-default: preview only unless --send-real and --approved-by are both set. Omitting every --to-* flag still posts, but internal-only.')
+  .argument('<work-order-id>', 'Internal RentVine workOrderID, NOT the display number (e.g. 58, not #100058)')
+  .argument('<message>', 'Message text (plain text; wrapped as an HTML paragraph for the API)')
+  .option('--to-tenant', 'Share with the tenant', false)
+  .option('--to-vendor', 'Share with the assigned vendor', false)
+  .option('--to-owner', 'Share with the owner', false)
+  .option('--to-cosigner', 'Share with the cosigner', false)
+  .option('--send-real', 'Actually post the message. Requires --approved-by <approval_id>.', false)
+  .option('--approved-by <approval-id>', 'Approved external-comms approval id required for live sends')
+  .action(async (
+    workOrderId: string,
+    message: string,
+    opts: { toTenant?: boolean; toVendor?: boolean; toOwner?: boolean; toCosigner?: boolean; sendReal?: boolean; approvedBy?: string },
+  ) => {
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+
+    try {
+      const { sendRentVineChatMessage } = await import('../bus/rentvine.js');
+      const result = await sendRentVineChatMessage(
+        paths,
+        workOrderId,
+        message,
+        { tenant: opts.toTenant, vendor: opts.toVendor, owner: opts.toOwner, cosigner: opts.toCosigner },
+        { sendReal: opts.sendReal, approvedBy: opts.approvedBy },
+      );
+
+      if (result.mode === 'dry-run') {
+        console.log(JSON.stringify(result, null, 2));
+        return;
+      }
+
+      logEvent(paths, env.agentName, env.org, 'action', 'rentvine_chat_sent', 'info', {
+        work_order_id: workOrderId,
+        approval_id: result.approvalId,
+        shared_with: { tenant: !!opts.toTenant, vendor: !!opts.toVendor, owner: !!opts.toOwner, cosigner: !!opts.toCosigner },
+        preview: message.length > 120 ? message.slice(0, 120) + '…' : message,
+      });
+      console.log(JSON.stringify(result, null, 2));
+    } catch (err: any) {
+      console.error(`Failed to send RentVine chat message: ${err.message || err}`);
+      process.exit(1);
+    }
+  });
+
+busCommand
   .command('send-sms')
   .description('Send an outbound SMS via Telnyx. Safe-by-default: preview only unless --send-real and --approved-by are both set.')
   .argument('<to-e164>', 'Recipient phone number in E.164 format, e.g. +12025550142')

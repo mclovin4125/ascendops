@@ -40,6 +40,29 @@ export interface RentVineLeaseBalance {
 }
 
 /**
+ * Rows come back flat (dot-notation field names per RentVine's docs, e.g.
+ * `message.id`, `user.name`), not wrapped in an envelope key like
+ * workOrder/vendor are — so this is NOT run through unwrapEnvelopeList.
+ * See orgs/lane-family-homes/agents/maintenance-director/knowledge/ops/rentvine-chat-api.md.
+ */
+export interface RentVineChatMessage {
+  [field: string]: unknown;
+}
+
+/** Payload for POST /chat/messages. Sharing flags default to 0/false server-side
+ * when omitted — an omitted flag means the message is posted internal-only. */
+export interface RentVineChatMessagePayload {
+  chatObjectTypeID: number; // 1=Work Order, 2=Lease, 3=Portfolio, 4=Vendor, 5=Applicant
+  objectID: number;         // the internal id (e.g. workOrderID), NOT a display number
+  message: string;          // HTML body
+  isSharedWithTenant?: 0 | 1;
+  isSharedWithVendor?: 0 | 1;
+  isSharedWithOwner?: 0 | 1;
+  isSharedWithCosigner?: 0 | 1;
+  attachments?: number[];
+}
+
+/**
  * Unwraps a RentVine list response, failing loud instead of silently
  * returning undefined fields if the real API's shape turns out to differ
  * from the unverified schema this client was written against.
@@ -106,6 +129,40 @@ export class RentVineAPI {
     return await response.json() as T;
   }
 
+  /**
+   * Shared POST wrapper, sibling of requestJson. Only used by writes (chat
+   * messages today); reads stay on requestJson/GET.
+   */
+  private async postJson<T>(path: string, body: unknown): Promise<T> {
+    const url = new URL(`${this.baseUrl}/${path}`);
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': this.authHeader(),
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(API_TIMEOUT_MS),
+    });
+
+    let responseBody: unknown;
+    try {
+      responseBody = await response.json();
+    } catch {
+      responseBody = await response.text();
+    }
+
+    if (!response.ok) {
+      throw new Error(
+        `RentVine API POST ${path} failed: HTTP ${response.status}: ` +
+        (typeof responseBody === 'string' ? responseBody : JSON.stringify(responseBody)),
+      );
+    }
+
+    return responseBody as T;
+  }
+
   async workOrders(params: Record<string, string> = {}): Promise<RentVineWorkOrder[]> {
     const data = await this.requestJson<unknown>('maintenance/work-orders', params);
     return unwrapEnvelopeList<RentVineWorkOrder>(data, 'workOrder', 'maintenance/work-orders');
@@ -153,8 +210,37 @@ export class RentVineAPI {
     });
   }
 
-  // No messages() method: no endpoint was found for resident/owner messages
-  // during research. See knowledge/projects/rentvine-integration.md — the
-  // first live-API action once credentials exist should be confirming
-  // whether one exists at all before this method gets written.
+  /**
+   * Read a work-order chat thread — GET /chat/messages.
+   *
+   * NOTE: this is a manager-role read, and RentVine auto-marks retrieved
+   * messages as read by the manager role as a side effect (verified,
+   * see the ops doc). Do not wrap this in a background poller without
+   * accounting for that — a polling loop would silently clear unread state
+   * for whoever's UI shows it. This client only exposes an on-demand read;
+   * no poller is built here.
+   */
+  async chatMessages(objectID: number, params: Record<string, string> = {}): Promise<RentVineChatMessage[]> {
+    const path = 'chat/messages';
+    const data = await this.requestJson<unknown>(path, {
+      chatObjectTypeID: '1', // Work Order
+      objectID: String(objectID),
+      ...params,
+    });
+    if (!Array.isArray(data)) {
+      throw new Error(`RentVine API ${path}: expected an array response, got ${typeof data}`);
+    }
+    return data as RentVineChatMessage[];
+  }
+
+  /**
+   * Post into a work-order chat thread — POST /chat/messages. This is the
+   * one call in this client that can reach a real tenant/vendor/owner; the
+   * bus layer (src/bus/rentvine.ts) is what gates a real send behind an
+   * approval id. This method itself performs no gating — do not call it
+   * directly from anywhere that skips that gate.
+   */
+  async postChatMessage(payload: RentVineChatMessagePayload): Promise<RentVineChatMessage> {
+    return this.postJson<RentVineChatMessage>('chat/messages', payload);
+  }
 }
