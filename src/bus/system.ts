@@ -43,7 +43,24 @@ const EXCLUDED_DIR_PREFIXES = [
   '.venv/',
 ];
 
-const CREDENTIAL_PATTERNS = /(?:token=|key=|password=|secret=|sk-|ghp_|xoxb-|AKIA)/;
+// `sk-` (OpenAI-style secret key prefix) was a bare 3-char substring match
+// with no length or boundary check, so it fired on ANY word ending in "sk"
+// followed by a hyphen — "risk-", "desk-", "task-", "disk-", "mask-", etc.
+// Confirmed 2026-08-11: blocked analyst's goals.json auto-commit on
+// "safety-risk-classified" (the "sk-" inside "risk-"), and the same shape
+// almost certainly explains earlier false positives on CHANGELOG.md and
+// ea/GUARDRAILS.md. Real OpenAI keys are "sk-" followed by a long unbroken
+// run of alphanumeric characters (~20-50+, no hyphens/spaces) — requiring
+// that run distinguishes a real key from an ordinary hyphenated word, since
+// English prose almost always hits a space well before 20 characters.
+// Deliberately NOT extended to hyphens in the required run: this org's own
+// naming convention is heavily kebab-case (branch names, task/experiment
+// ids, digest slugs), and allowing hyphens would trade one false-positive
+// class for another. The other prefixes below (ghp_, xoxb-, AKIA, and the
+// `=`-based patterns) are specific enough that no false positive has been
+// observed yet — narrow this fix to the demonstrated bug rather than
+// speculatively rewriting patterns with no evidence of a problem.
+const CREDENTIAL_PATTERNS = /(?:token=|key=|password=|secret=|sk-[A-Za-z0-9]{20,}|ghp_|xoxb-|AKIA)/;
 
 const SCRIPT_EXTENSIONS = new Set(['.sh', '.py', '.js']);
 

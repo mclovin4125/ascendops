@@ -159,6 +159,27 @@ describe('Bus System', () => {
       expect(report.staged).toContain('readme.md');
     });
 
+    it('does NOT block ordinary hyphenated words that happen to contain "sk-" (2026-08-11 false positive)', () => {
+      // Confirmed regression: "safety-risk-classified" in analyst's
+      // goals.json blocked an auto-commit because the old sk- pattern was
+      // a bare substring match with no length check — "risk-" contains
+      // "sk-". Same shape as "desk-", "task-", "disk-", "mask-".
+      writeFileSync(join(gitDir, 'goals.json'), JSON.stringify({
+        focus: 'Watch the safety-risk-classified work order for the urgency-framing experiment.',
+      }));
+
+      const report = autoCommit(gitDir, true);
+      expect(report.staged).toContain('goals.json');
+      expect(report.blocked.some(b => b.includes('goals.json'))).toBe(false);
+    });
+
+    it('still blocks a real-shaped sk- secret key (long unbroken alphanumeric run)', () => {
+      writeFileSync(join(gitDir, 'notes.md'), 'API key: sk-abcdefghijklmnopqrstuvwxyz0123456789');
+
+      const report = autoCommit(gitDir, true);
+      expect(report.blocked.some(b => b.includes('notes.md') && b.includes('credential'))).toBe(true);
+    });
+
     it('allows script files even with credential-like patterns', () => {
       writeFileSync(join(gitDir, 'deploy.sh'), '#!/bin/bash\ntoken=get_from_env');
       writeFileSync(join(gitDir, 'app.py'), 'password=input("Enter:")');
