@@ -2348,7 +2348,8 @@ busCommand
   .option('--all-orgs', 'Scan all orgs under CTX_ROOT (matches dashboard view)', false)
   .option('--stale', 'Only show approvals pending past the staleness threshold', false)
   .option('--stale-hours <n>', 'Staleness threshold in hours (default: 3 — intentionally below the 4h heartbeat cadence so a fire never silently misses a cycle, see DEFAULT_APPROVAL_STALE_MS)', '3')
-  .action((opts: { format?: string; allOrgs?: boolean; stale?: boolean; staleHours?: string }) => {
+  .option('--agent <name>', 'Only show approvals requested by this agent — a shorter, unambiguous list when resolving on someone\'s behalf (see 2026-08-12 WO #100059: a peer agent misresolved the wrong one of several open items)')
+  .action((opts: { format?: string; allOrgs?: boolean; stale?: boolean; staleHours?: string; agent?: string }) => {
     const { listPendingApprovals, isApprovalStale } = require('../bus/approval.js');
     const { readdirSync, existsSync } = require('fs');
     const { join, homedir: _homedir } = require('path');
@@ -2384,6 +2385,9 @@ busCommand
     }));
     if (opts.stale) {
       approvals = (approvals as Array<{ stale: boolean }>).filter((a) => a.stale);
+    }
+    if (opts.agent) {
+      approvals = (approvals as Array<{ requesting_agent: string }>).filter((a) => a.requesting_agent === opts.agent);
     }
 
     if (opts.format === 'text') {
