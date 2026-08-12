@@ -130,12 +130,20 @@ if [[ "$HEARTBEAT_NOOP" != "true" ]]; then
 fi
 ```
 
-For each pending approval in 5c, check `created_at`:
-- If pending >4h AND it's day mode (07:30-19:30 ET) AND no re-ping has been sent yet for this approval → send ONE re-ping:
+For each pending approval in 5c, check `created_at` (or just read the `stale` field —
+`list-approvals` already flags it using the same 3h threshold below):
+- If pending **>=3h** AND it's day mode (07:30-19:30 ET) AND no re-ping has been sent yet for
+  this approval → send ONE re-ping:
   ```bash
   cortextos bus send-telegram "$CTX_TELEGRAM_CHAT_ID" \
     "Reminder: approval for '<title>' is still pending. No rush, just flagging."
   ```
+  **Why 3h, not 4h:** this sweep runs once per heartbeat fire (every 4h). A threshold set equal
+  to the interval can silently miss a cycle — an approval created just after one fire is still
+  under 4h old at the very next fire (which lands just under 4h later), so it wouldn't trip until
+  the fire AFTER that, up to ~8h stale before anyone is told. 3h guarantees the gap since the
+  last fire (always <4h) exceeds the threshold, so it's always caught on the first eligible
+  cycle even with cron-fire jitter.
 - Send only ONE re-ping per approval. Do not spam.
 - Night mode (after 19:30 ET): skip re-pings, defer to next day's first heartbeat.
 
