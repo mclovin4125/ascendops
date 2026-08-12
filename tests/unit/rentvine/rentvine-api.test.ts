@@ -25,6 +25,7 @@ function httpError(status: number, retryAfter?: string) {
     json: async () => {
       throw new SyntaxError('Unexpected token < in JSON');
     },
+    text: async () => '<html>error page</html>',
   };
 }
 
@@ -147,5 +148,72 @@ describe('RentVineAPI — response shape validation (fail loud, not silently wro
     const api = new RentVineAPI(AUTH);
 
     await expect(api.leaseBalances()).rejects.toThrow(/missing "lease" or "balances"/);
+  });
+});
+
+describe('RentVineAPI — chat messages', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it('chatMessages GETs with chatObjectTypeID=1 (Work Order) and the internal objectID', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(okResponse([]));
+    vi.stubGlobal('fetch', fetchMock);
+    const api = new RentVineAPI(AUTH);
+
+    await api.chatMessages(58);
+
+    const [url] = fetchMock.mock.calls[0] as [URL];
+    expect(url.pathname).toBe('/api/manager/chat/messages');
+    expect(url.searchParams.get('chatObjectTypeID')).toBe('1');
+    expect(url.searchParams.get('objectID')).toBe('58');
+  });
+
+  it('chatMessages returns the flat rows as-is — NOT run through the workOrder/contact envelope unwrap', async () => {
+    const rows = [{ 'message.id': 1, 'message.body': '<p>hi</p>', 'user.name': 'Mack' }];
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(okResponse(rows)));
+    const api = new RentVineAPI(AUTH);
+
+    await expect(api.chatMessages(58)).resolves.toEqual(rows);
+  });
+
+  it('chatMessages throws if the response is not an array', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(okResponse({ not: 'an array' })));
+    const api = new RentVineAPI(AUTH);
+
+    await expect(api.chatMessages(58)).rejects.toThrow(/expected an array response/);
+  });
+
+  it('postChatMessage POSTs the exact payload with Basic auth', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(okResponse({ id: 999 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const api = new RentVineAPI(AUTH);
+    const payload = {
+      chatObjectTypeID: 1,
+      objectID: 58,
+      message: '<p>hello</p>',
+      isSharedWithTenant: 1 as const,
+      isSharedWithVendor: 1 as const,
+    };
+
+    const result = await api.postChatMessage(payload);
+
+    const [url, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    expect(url.toString()).toBe('https://acme.rentvine.com/api/manager/chat/messages');
+    expect(init.method).toBe('POST');
+    const headers = init.headers as Record<string, string>;
+    expect(headers['Authorization']).toBe(`Basic ${Buffer.from('key123:secret456').toString('base64')}`);
+    expect(JSON.parse(init.body as string)).toEqual(payload);
+    expect(result).toEqual({ id: 999 });
+  });
+
+  it('postChatMessage surfaces a non-OK HTTP status descriptively', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(httpError(400)));
+    const api = new RentVineAPI(AUTH);
+
+    await expect(
+      api.postChatMessage({ chatObjectTypeID: 1, objectID: 58, message: '<p>x</p>' }),
+    ).rejects.toThrow(/HTTP 400/);
   });
 });
