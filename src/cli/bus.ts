@@ -16,7 +16,7 @@ import { selfRestart, hardRestart, autoCommit, ensureGitRepoInitialized, checkGo
 import { createExperiment, runExperiment, evaluateExperiment, listExperiments, gatherContext, manageCycle, loadExperimentConfig } from '../bus/experiment.js';
 import { browseCatalog, installCommunityItem, prepareSubmission, submitCommunityItem } from '../bus/catalog.js';
 import { collectMetrics, parseUsageOutput, storeUsageData, checkUpstream, findStrandedBranches, collectTelegramCommands, registerTelegramCommands } from '../bus/metrics.js';
-import { createApproval, updateApproval } from '../bus/approval.js';
+import { createApproval, updateApproval, correctApproval } from '../bus/approval.js';
 import { listActiveThreads, addActiveThread, updateActiveThread, removeActiveThread, clearActiveThreads } from '../bus/active-threads.js';
 import { listVendorDocPatterns, vendorDocPattern } from '../bus/vendor-patterns.js';
 import { createReminder, listReminders, ackReminder, pruneReminders } from '../bus/reminders.js';
@@ -1706,6 +1706,23 @@ busCommand
     // here but not on the daemon's Telegram-callback / dashboard paths.
     updateApproval(paths, id, status as ApprovalStatus, note, env.agentName);
     console.log(`Approval ${id} -> ${status}`);
+  });
+
+busCommand
+  .command('correct-approval')
+  .description('Flag an already-resolved approval as corrected (append-only — the original decision is left intact, this adds what was later found wrong about it). See correctApproval in bus/approval.ts.')
+  .argument('<id>', 'Approval ID (must already be resolved — a still-pending approval should just be resolved normally)')
+  .argument('<note>', 'What was wrong about the original resolution')
+  .action((id: string, note: string) => {
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    try {
+      correctApproval(paths, id, note, env.agentName);
+      console.log(`Approval ${id} flagged as corrected.`);
+    } catch (err: any) {
+      console.error(`Failed to correct approval: ${err.message || err}`);
+      process.exit(1);
+    }
   });
 
 // ---------------------------------------------------------------------------
