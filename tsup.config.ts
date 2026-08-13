@@ -17,6 +17,7 @@ export default defineConfig({
     'hooks/hook-session-restore': 'src/hooks/hook-session-restore.ts',
     'hooks/hook-loop-detector': 'src/hooks/hook-loop-detector.ts',
     'hooks/hook-skill-autopr': 'src/hooks/hook-skill-autopr.ts',
+    'hooks/hook-rentvine-approval-gate': 'src/hooks/hook-rentvine-approval-gate.ts',
   },
   format: ['cjs'],
   target: 'node20',
