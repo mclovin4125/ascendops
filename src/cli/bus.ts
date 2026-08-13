@@ -2367,7 +2367,7 @@ busCommand
   .option('--stale-hours <n>', 'Staleness threshold in hours (default: 3 — intentionally below the 4h heartbeat cadence so a fire never silently misses a cycle, see DEFAULT_APPROVAL_STALE_MS)', '3')
   .option('--agent <name>', 'Only show approvals requested by this agent — a shorter, unambiguous list when resolving on someone\'s behalf (see 2026-08-12 WO #100059: a peer agent misresolved the wrong one of several open items)')
   .action((opts: { format?: string; allOrgs?: boolean; stale?: boolean; staleHours?: string; agent?: string }) => {
-    const { listPendingApprovals, isApprovalStale } = require('../bus/approval.js');
+    const { listPendingApprovals, isApprovalStale, recordApprovalLookup } = require('../bus/approval.js');
     const { readdirSync, existsSync } = require('fs');
     const { join, homedir: _homedir } = require('path');
     const { homedir } = require('os');
@@ -2405,6 +2405,21 @@ busCommand
     }
     if (opts.agent) {
       approvals = (approvals as Array<{ requesting_agent: string }>).filter((a) => a.requesting_agent === opts.agent);
+      // Record a lookup token: this agent just saw exactly these ids for
+      // this requester. update-approval's disambiguation check consumes it
+      // (see src/bus/approval.ts LOOKUP_TOKEN_TTL_MS / hasFreshLookupToken)
+      // so a peer agent resolving on someone's behalf must have looked at
+      // this disambiguated list first, not guessed an id from memory.
+      // Always recorded against the caller's own org paths, even under
+      // --all-orgs — approval ids are globally unique so this is safe, and
+      // update-approval only ever resolves within a single org anyway.
+      const tokenPaths = resolvePaths(env.agentName, env.instanceId, env.org);
+      recordApprovalLookup(
+        tokenPaths,
+        env.agentName,
+        opts.agent,
+        (approvals as Array<{ id: string }>).map((a) => a.id),
+      );
     }
 
     if (opts.format === 'text') {
