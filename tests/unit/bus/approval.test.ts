@@ -28,7 +28,7 @@ vi.mock('../../../src/telegram/api', () => ({
 import { mkdtempSync, rmSync, readdirSync, readFileSync, existsSync, writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { createApproval, updateApproval, listPendingApprovals } from '../../../src/bus/approval';
+import { createApproval, updateApproval, correctApproval, listPendingApprovals } from '../../../src/bus/approval';
 import type { BusPaths } from '../../../src/types';
 
 let testDir: string;
@@ -461,6 +461,68 @@ describe('updateApproval — self-resolution gap (2026-08-10 incident)', () => {
 
     expect(() => updateApproval(paths, id, 'approved', 'via Telegram activity channel by Mack (@mack)')).not.toThrow();
     expect(existsSync(join(paths.approvalDir, 'resolved', `${id}.json`))).toBe(true);
+  });
+});
+
+describe('correctApproval (WO #100059 incident, 2026-08-13)', () => {
+  it('flags a resolved approval as corrected without touching the original decision', async () => {
+    const id = await createApproval(paths, 'maintenance-director', 'TestOrg', 'Approve patches request', 'other', undefined, frameworkRoot);
+    updateApproval(paths, id, 'approved', 'Mack via Telegram: "Approve all"', 'ea');
+
+    correctApproval(paths, id, 'Misread which item Mack meant — he was referring to a different WO entirely.', 'ea');
+
+    const resolvedFile = join(paths.approvalDir, 'resolved', `${id}.json`);
+    const approval = JSON.parse(readFileSync(resolvedFile, 'utf-8'));
+    // Original decision is untouched — this is an annotation, not a rewrite.
+    expect(approval.status).toBe('approved');
+    expect(approval.resolved_by).toBe('Mack via Telegram: "Approve all"');
+    // Correction fields are appended.
+    expect(approval.corrected).toBe(true);
+    expect(approval.correction_note).toBe('Misread which item Mack meant — he was referring to a different WO entirely.');
+    expect(approval.corrected_by).toBe('ea');
+    expect(approval.corrected_at).toBeTruthy();
+  });
+
+  it('allows the SAME agent that resolved it to flag the correction (self-correction, unlike self-resolution, is not gated)', async () => {
+    const id = await createApproval(paths, 'maintenance-director', 'TestOrg', 'Approve patches request', 'other', undefined, frameworkRoot);
+    updateApproval(paths, id, 'approved', 'note', 'ea');
+
+    // ea corrects its own mistake — must NOT throw. Flagging your own error
+    // is exactly the behavior this exists to encourage (see WO #100059,
+    // where ea caught and corrected its own misresolution within minutes).
+    expect(() => correctApproval(paths, id, 'I misread this, correcting now.', 'ea')).not.toThrow();
+    const approval = JSON.parse(readFileSync(join(paths.approvalDir, 'resolved', `${id}.json`), 'utf-8'));
+    expect(approval.corrected).toBe(true);
+  });
+
+  it('refuses a correction with no note — a correction must say what was wrong', async () => {
+    const id = await createApproval(paths, 'maintenance-director', 'TestOrg', 'Approve patches request', 'other', undefined, frameworkRoot);
+    updateApproval(paths, id, 'approved', 'note', 'ea');
+
+    expect(() => correctApproval(paths, id, '', 'ea')).toThrow(/non-empty note/);
+    expect(() => correctApproval(paths, id, '   ', 'ea')).toThrow(/non-empty note/);
+  });
+
+  it('refuses to correct an approval that is still pending, with a distinct error pointing at the real fix', async () => {
+    const id = await createApproval(paths, 'maintenance-director', 'TestOrg', 'Approve patches request', 'other', undefined, frameworkRoot);
+    // Never resolved.
+
+    expect(() => correctApproval(paths, id, 'trying to correct before it was even resolved', 'ea'))
+      .toThrow(/still pending, not yet resolved/);
+  });
+
+  it('throws a clear error when the approval id does not exist at all', () => {
+    expect(() => correctApproval(paths, 'approval_999_nope', 'note', 'ea')).toThrow(/not found/);
+  });
+
+  it('scrubs an SSN out of the correction note before persisting it', async () => {
+    const id = await createApproval(paths, 'maintenance-director', 'TestOrg', 'Approve patches request', 'other', undefined, frameworkRoot);
+    updateApproval(paths, id, 'approved', 'note', 'ea');
+
+    correctApproval(paths, id, 'Wrong tenant contacted, SSN 123-45-6789 was referenced in error.', 'ea');
+
+    const approval = JSON.parse(readFileSync(join(paths.approvalDir, 'resolved', `${id}.json`), 'utf-8'));
+    expect(approval.correction_note).not.toContain('123-45-6789');
   });
 });
 

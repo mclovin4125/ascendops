@@ -146,6 +146,19 @@ export interface Approval {
   updated_at: string;
   resolved_at: string | null;
   resolved_by: string | null;
+  /**
+   * Set when a resolved approval is later discovered to have been wrong
+   * (see correctApproval in bus/approval.ts — added after the 2026-08-12
+   * WO #100059 incident, where the correction only existed as memory notes,
+   * fragmenting the audit trail away from the approval record itself).
+   * The ORIGINAL status/resolved_by/resolved_at are never touched — this is
+   * an append-only annotation, not a rewrite, so the record still shows
+   * exactly what was decided and what was later found wrong about it.
+   */
+  corrected?: boolean;
+  correction_note?: string;
+  corrected_at?: string;
+  corrected_by?: string;
 }
 
 // Agent Config Types (config.json)

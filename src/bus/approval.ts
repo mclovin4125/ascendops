@@ -313,6 +313,70 @@ export function updateApproval(
 }
 
 /**
+ * Flag an already-resolved approval as corrected — added after the
+ * 2026-08-12 WO #100059 incident, where an approval was resolved in error
+ * (a peer agent misread which of several open items Mack meant) and the
+ * correction ended up documented only in memory notes and GUARDRAILS.md,
+ * fragmenting the audit trail away from the approval record itself.
+ *
+ * This is deliberately append-only, NOT a rewrite: the original
+ * status/resolved_by/resolved_at are left untouched, so the record still
+ * shows exactly what was decided AND that it was later found wrong —
+ * both facts, not one overwriting the other.
+ *
+ * Deliberately NOT gated the way updateApproval's resolvedByAgent check is.
+ * Self-approval risk is about an agent granting itself new permission;
+ * flagging your own mistake is the opposite — it should be as easy as
+ * possible so it actually happens (this is exactly how WO #100059 got
+ * caught: the same agent that misresolved it corrected itself within
+ * minutes). The safety property here is append-only + always-visible, not
+ * who is allowed to say it.
+ *
+ * Only applies to an approval that has already been resolved (moved to
+ * resolved/) — a still-pending approval doesn't need "correction," it can
+ * just be resolved normally.
+ */
+export function correctApproval(
+  paths: BusPaths,
+  approvalId: string,
+  correctionNote: string,
+  correctedBy: string,
+): void {
+  if (!correctionNote || !correctionNote.trim()) {
+    throw new Error('correction requires a non-empty note explaining what was wrong');
+  }
+  const scrubbedNote = redactSSN(correctionNote);
+
+  const resolvedFile = join(paths.approvalDir, 'resolved', `${approvalId}.json`);
+  let approval: Approval;
+  try {
+    approval = JSON.parse(readFileSync(resolvedFile, 'utf-8'));
+  } catch (err) {
+    // Distinguish "still pending" from "never existed" — both land here
+    // (readFileSync throws either way), but the fix differs: a pending
+    // approval should be resolved normally, not corrected.
+    const pendingFile = join(paths.approvalDir, 'pending', `${approvalId}.json`);
+    if (existsSync(pendingFile)) {
+      throw new Error(`approval ${approvalId} is still pending, not yet resolved — resolve it first, there is nothing to correct yet`);
+    }
+    throw new Error(`resolved approval ${approvalId} not found: ${err}`);
+  }
+
+  approval.corrected = true;
+  approval.correction_note = scrubbedNote;
+  approval.corrected_at = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+  approval.corrected_by = correctedBy;
+
+  atomicWriteSync(resolvedFile, JSON.stringify(approval));
+
+  if (approval.requesting_agent) {
+    const msg = `Approval correction: ${approvalId} has been flagged as corrected by ${correctedBy}.\n` +
+      `Original decision: ${approval.status}\nCorrection note: ${scrubbedNote}`;
+    sendMessage(paths, 'system', approval.requesting_agent, 'urgent', msg);
+  }
+}
+
+/**
  * Default: flag a pending approval unresolved for 3h+.
  *
  * Deliberately set BELOW the default 4h heartbeat cadence, not equal to it.
