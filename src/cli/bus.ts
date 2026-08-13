@@ -3504,6 +3504,11 @@ busCommand
   .action(() => runHook('hook-skill-autopr'));
 
 busCommand
+  .command('hook-rentvine-approval-gate')
+  .description('PreToolUse hook: blocks external-facing RentVine MCP writes (send_rentvine_feedback) unless the calling agent has a recently resolved, approved approval on record')
+  .action(() => runHook('hook-rentvine-approval-gate'));
+
+busCommand
   .command('create-skill-pr')
   .description('Background worker: commits and draft-PRs a community skill (called by hook-skill-autopr)')
   .argument('<skill-name>', 'Skill directory name under community/skills/')
