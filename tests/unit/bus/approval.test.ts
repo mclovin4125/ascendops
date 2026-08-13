@@ -28,7 +28,9 @@ vi.mock('../../../src/telegram/api', () => ({
 import { mkdtempSync, rmSync, readdirSync, readFileSync, existsSync, writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { createApproval, updateApproval, correctApproval, listPendingApprovals } from '../../../src/bus/approval';
+import {
+  createApproval, updateApproval, correctApproval, listPendingApprovals, recordApprovalLookup,
+} from '../../../src/bus/approval';
 import type { BusPaths } from '../../../src/types';
 
 let testDir: string;
@@ -523,6 +525,122 @@ describe('correctApproval (WO #100059 incident, 2026-08-13)', () => {
 
     const approval = JSON.parse(readFileSync(join(paths.approvalDir, 'resolved', `${id}.json`), 'utf-8'));
     expect(approval.correction_note).not.toContain('123-45-6789');
+  });
+});
+
+describe('updateApproval — resolution disambiguation gate (2026-08-13 Task B)', () => {
+  // Design: a peer agent (resolvedByAgent set, not the requester, not the
+  // "dashboard" sentinel) resolving one of SEVERAL pending approvals from the
+  // same requester must have a fresh list-approvals --agent lookup token
+  // covering that exact id — proof it looked at the disambiguated list
+  // rather than picking an id from memory. See 2026-08-12 WO #100059.
+
+  it('refuses a cross-agent resolution when multiple pending approvals exist for the requester and no lookup token is on file', async () => {
+    const idA = await createApproval(paths, 'maintenance-director', 'TestOrg', 'First request', 'other', undefined, frameworkRoot);
+    await createApproval(paths, 'maintenance-director', 'TestOrg', 'Second request', 'other', undefined, frameworkRoot);
+
+    expect(() => updateApproval(paths, idA, 'approved', undefined, 'ea'))
+      .toThrow(/2 pending approvals from maintenance-director.*list-approvals --agent maintenance-director/s);
+
+    // Refused resolution must leave the approval untouched, same contract as the self-resolution gate.
+    expect(existsSync(join(paths.approvalDir, 'pending', `${idA}.json`))).toBe(true);
+    expect(existsSync(join(paths.approvalDir, 'resolved', `${idA}.json`))).toBe(false);
+  });
+
+  it('allows a cross-agent resolution with no token when only one pending approval exists for the requester (no ambiguity)', async () => {
+    const id = await createApproval(paths, 'maintenance-director', 'TestOrg', 'Only request', 'other', undefined, frameworkRoot);
+
+    expect(() => updateApproval(paths, id, 'approved', undefined, 'ea')).not.toThrow();
+    expect(existsSync(join(paths.approvalDir, 'resolved', `${id}.json`))).toBe(true);
+  });
+
+  it('allows a cross-agent resolution when the resolver has a fresh matching lookup token', async () => {
+    const idA = await createApproval(paths, 'maintenance-director', 'TestOrg', 'First request', 'other', undefined, frameworkRoot);
+    const idB = await createApproval(paths, 'maintenance-director', 'TestOrg', 'Second request', 'other', undefined, frameworkRoot);
+
+    // Simulates `list-approvals --agent maintenance-director` run by ea immediately before resolving.
+    recordApprovalLookup(paths, 'ea', 'maintenance-director', [idA, idB]);
+
+    expect(() => updateApproval(paths, idA, 'approved', undefined, 'ea')).not.toThrow();
+    expect(existsSync(join(paths.approvalDir, 'resolved', `${idA}.json`))).toBe(true);
+  });
+
+  it('refuses when a lookup token exists but for a different requester', async () => {
+    const idA = await createApproval(paths, 'maintenance-director', 'TestOrg', 'First request', 'other', undefined, frameworkRoot);
+    await createApproval(paths, 'maintenance-director', 'TestOrg', 'Second request', 'other', undefined, frameworkRoot);
+
+    // ea looked up someone else's approvals, not maintenance-director's — must not count.
+    recordApprovalLookup(paths, 'ea', 'analyst', [idA]);
+
+    expect(() => updateApproval(paths, idA, 'approved', undefined, 'ea')).toThrow(/2 pending approvals from maintenance-director/);
+  });
+
+  it('refuses when a lookup token exists for the right requester but does not cover this id', async () => {
+    const idA = await createApproval(paths, 'maintenance-director', 'TestOrg', 'First request', 'other', undefined, frameworkRoot);
+    const idB = await createApproval(paths, 'maintenance-director', 'TestOrg', 'Second request', 'other', undefined, frameworkRoot);
+
+    // Token only saw idB (e.g. idA was created after the listing) — resolving idA must still be refused.
+    recordApprovalLookup(paths, 'ea', 'maintenance-director', [idB]);
+
+    expect(() => updateApproval(paths, idA, 'approved', undefined, 'ea')).toThrow(/2 pending approvals from maintenance-director/);
+  });
+
+  it('refuses when the lookup token belongs to a different resolving agent', async () => {
+    const idA = await createApproval(paths, 'maintenance-director', 'TestOrg', 'First request', 'other', undefined, frameworkRoot);
+    const idB = await createApproval(paths, 'maintenance-director', 'TestOrg', 'Second request', 'other', undefined, frameworkRoot);
+
+    // analyst looked at the list, but ea is the one resolving — analyst's token doesn't authorize ea.
+    recordApprovalLookup(paths, 'analyst', 'maintenance-director', [idA, idB]);
+
+    expect(() => updateApproval(paths, idA, 'approved', undefined, 'ea')).toThrow(/2 pending approvals from maintenance-director/);
+  });
+
+  it('refuses once the lookup token has aged past LOOKUP_TOKEN_TTL_MS', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-08-13T12:00:00Z'));
+      const idA = await createApproval(paths, 'maintenance-director', 'TestOrg', 'First request', 'other', undefined, frameworkRoot);
+      const idB = await createApproval(paths, 'maintenance-director', 'TestOrg', 'Second request', 'other', undefined, frameworkRoot);
+      recordApprovalLookup(paths, 'ea', 'maintenance-director', [idA, idB]);
+
+      // 11 minutes later — past the 10-minute TTL.
+      vi.setSystemTime(new Date('2026-08-13T12:11:00Z'));
+      expect(() => updateApproval(paths, idA, 'approved', undefined, 'ea')).toThrow(/2 pending approvals from maintenance-director/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('allows resolution just under the TTL boundary', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-08-13T12:00:00Z'));
+      const idA = await createApproval(paths, 'maintenance-director', 'TestOrg', 'First request', 'other', undefined, frameworkRoot);
+      const idB = await createApproval(paths, 'maintenance-director', 'TestOrg', 'Second request', 'other', undefined, frameworkRoot);
+      recordApprovalLookup(paths, 'ea', 'maintenance-director', [idA, idB]);
+
+      // 9 minutes 59 seconds later — just inside the 10-minute TTL.
+      vi.setSystemTime(new Date('2026-08-13T12:09:59Z'));
+      expect(() => updateApproval(paths, idA, 'approved', undefined, 'ea')).not.toThrow();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not gate the "dashboard" sentinel even with multiple pending approvals (human already sees the full list in the UI)', async () => {
+    const idA = await createApproval(paths, 'maintenance-director', 'TestOrg', 'First request', 'other', undefined, frameworkRoot);
+    await createApproval(paths, 'maintenance-director', 'TestOrg', 'Second request', 'other', undefined, frameworkRoot);
+
+    expect(() => updateApproval(paths, idA, 'approved', undefined, 'dashboard')).not.toThrow();
+    expect(existsSync(join(paths.approvalDir, 'resolved', `${idA}.json`))).toBe(true);
+  });
+
+  it('does not gate an omitted resolvedByAgent even with multiple pending approvals (Telegram activity-channel callback, its own allow-list check)', async () => {
+    const idA = await createApproval(paths, 'maintenance-director', 'TestOrg', 'First request', 'other', undefined, frameworkRoot);
+    await createApproval(paths, 'maintenance-director', 'TestOrg', 'Second request', 'other', undefined, frameworkRoot);
+
+    expect(() => updateApproval(paths, idA, 'approved', 'via Telegram activity channel by Mack (@mack)')).not.toThrow();
+    expect(existsSync(join(paths.approvalDir, 'resolved', `${idA}.json`))).toBe(true);
   });
 });
 

@@ -237,6 +237,66 @@ export async function createApproval(
 }
 
 /**
+ * TTL for a `list-approvals --agent <requester>` lookup token (see
+ * updateApproval's disambiguation check below). Short-lived — this is proof
+ * that the resolving agent just looked at the disambiguated list in the same
+ * turn, not a standing grant. 10 minutes covers a normal list-then-resolve
+ * CLI sequence with slack for tool latency, without staying valid long
+ * enough that a stale token from an earlier, unrelated listing could be
+ * reused to wave through a later resolution.
+ */
+export const LOOKUP_TOKEN_TTL_MS = 10 * 60 * 1000;
+
+function lookupTokenPath(paths: BusPaths, resolvingAgent: string, requestingAgent: string): string {
+  return join(paths.approvalDir, 'lookup-tokens', `${resolvingAgent}__${requestingAgent}.json`);
+}
+
+/**
+ * Record that `listingAgent` just ran `list-approvals --agent <requestingAgent>`
+ * and was shown exactly `ids`. Called from the list-approvals CLI action
+ * whenever --agent is passed. Consumed by updateApproval's disambiguation
+ * check (see LOOKUP_TOKEN_TTL_MS) — this is the "the caller cites the
+ * specific id from that list" half of the 2026-08-13 Task B design.
+ */
+export function recordApprovalLookup(
+  paths: BusPaths,
+  listingAgent: string,
+  requestingAgent: string,
+  ids: string[],
+): void {
+  const dir = join(paths.approvalDir, 'lookup-tokens');
+  ensureDir(dir);
+  const token = { ids, created_at: new Date().toISOString() };
+  atomicWriteSync(lookupTokenPath(paths, listingAgent, requestingAgent), JSON.stringify(token));
+}
+
+/**
+ * True when `resolvingAgent` has a fresh (within LOOKUP_TOKEN_TTL_MS)
+ * recorded lookup of `requestingAgent`'s pending approvals that included
+ * `approvalId`. A missing, expired, or non-matching token all resolve to
+ * false — the caller must fail closed, not open, on any doubt.
+ */
+function hasFreshLookupToken(
+  paths: BusPaths,
+  resolvingAgent: string,
+  requestingAgent: string,
+  approvalId: string,
+  nowMs: number = Date.now(),
+): boolean {
+  let token: { ids?: unknown; created_at?: string };
+  try {
+    token = JSON.parse(readFileSync(lookupTokenPath(paths, resolvingAgent, requestingAgent), 'utf-8'));
+  } catch {
+    return false;
+  }
+  const createdMs = new Date(token.created_at ?? '').getTime();
+  if (Number.isNaN(createdMs)) return false;
+  const age = nowMs - createdMs;
+  if (age < 0 || age >= LOOKUP_TOKEN_TTL_MS) return false;
+  return Array.isArray(token.ids) && token.ids.includes(approvalId);
+}
+
+/**
  * Update an approval's status (approve or deny).
  * Notifies the requesting agent via inbox message.
  *
@@ -247,7 +307,7 @@ export async function createApproval(
  * inbound Telegram user against an allow-list before ever calling this; the
  * dashboard's API route always resolves as agent name "dashboard", which
  * cannot equal a real requesting_agent) — those paths are not a bare agent
- * self-service call and should not be gated by this check.
+ * self-service call and should not be gated by either check below.
  *
  * Confirmed 2026-08-10: an agent could satisfy an --approved-by gate (e.g.
  * sendSms, sendRentVineChatMessage) by calling `create-approval` and
@@ -256,6 +316,17 @@ export async function createApproval(
  * check. This closes that hole for the plain CLI path: an agent's own
  * session cannot resolve its own approval, because the CLI always passes
  * its own agent identity here.
+ *
+ * Confirmed 2026-08-12 (WO #100059-adjacent): a peer agent resolving on
+ * someone else's behalf picked the wrong one of several open approvals from
+ * the same requester — plausible when an agent is choosing an id from
+ * memory/context rather than a list it just looked at. When resolvedByAgent
+ * is a genuine peer agent (not the requester, not the "dashboard" sentinel —
+ * a human on the dashboard UI already sees the full disambiguated list
+ * before clicking, so is not this failure mode) and more than one pending
+ * approval exists for that requester, the resolution is refused unless the
+ * caller has a fresh recordApprovalLookup token (via `list-approvals --agent
+ * <requester>`) covering this exact id. See LOOKUP_TOKEN_TTL_MS.
  */
 export function updateApproval(
   paths: BusPaths,
@@ -272,8 +343,8 @@ export function updateApproval(
   const filePath = join(pendingDir, `${approvalId}.json`);
 
   // Read + parse in its own try/catch so a genuinely missing/corrupt file
-  // reports "not found" — the self-resolution check below must NOT get
-  // caught and rewrapped into that same misleading message.
+  // reports "not found" — the checks below must NOT get caught and
+  // rewrapped into that same misleading message.
   let approval: Approval;
   try {
     const content = readFileSync(filePath, 'utf-8');
@@ -288,6 +359,19 @@ export function updateApproval(
       'that requested it. Approvals must be resolved by Mack (via Telegram or the dashboard), ' +
       'not self-granted by the requesting agent.',
     );
+  }
+
+  if (resolvedByAgent && resolvedByAgent !== 'dashboard' && resolvedByAgent !== approval.requesting_agent) {
+    const siblingCount = listPendingApprovals(paths)
+      .filter((a) => a.requesting_agent === approval.requesting_agent).length;
+    if (siblingCount > 1 && !hasFreshLookupToken(paths, resolvedByAgent, approval.requesting_agent, approvalId)) {
+      throw new Error(
+        `approval ${approvalId} is one of ${siblingCount} pending approvals from ${approval.requesting_agent} — ` +
+        `resolving it by id alone risks picking the wrong one (see 2026-08-12 WO #100059). Run ` +
+        `'list-approvals --agent ${approval.requesting_agent}' first, confirm ${approvalId} is the intended one, ` +
+        'then retry update-approval.',
+      );
+    }
   }
 
   approval.status = status;
