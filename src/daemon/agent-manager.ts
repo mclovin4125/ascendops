@@ -1706,8 +1706,23 @@ export class AgentManager {
    *
    * Returns `null` to allow the fire, or an object describing the suppression
    * mode to drop it. Crons with `wake_on_fire: true` always return `null` —
-   * they bypass the shift gate entirely. Agents without a `shift_schedule`
+   * they bypass the shift gate entirely, in both `off_shift_no_wake` and
+   * `off_shift_emergency_only`. Crons with `emergency_allowed: true` return
+   * `null` ONLY during `off_shift_emergency_only` — the softer exemption;
+   * they still get suppressed during the stricter `off_shift_no_wake` (no
+   * emergency_override configured at all). Agents without a `shift_schedule`
    * configured evaluate as in-shift always (returns `null`).
+   *
+   * Previously `emergency_allowed` was defined on `CronDefinition` /
+   * `CronEntry` but never read here — every cron in `off_shift_emergency_only`
+   * was suppressed regardless of the flag (mode `emergency_only_no_tag`, a
+   * name implying a tag check that never actually happened). Confirmed
+   * 2026-08-19 while investigating a real overnight WO-detection gap
+   * (task_1787141008458_10208705) — not itself the cause of that incident
+   * (the affected agent had no emergency_override configured, so it was
+   * already in the stricter `off_shift_no_wake`, where `emergency_allowed`
+   * was never going to help; `wake_on_fire` is the correct fix there), but a
+   * genuine dead-code defect found along the way.
    *
    * Visible on the instance (not exported) so unit tests can drive it directly
    * without spinning up a real CronScheduler.
@@ -1725,7 +1740,10 @@ export class AgentManager {
     const tz = agentConfig.timezone || 'America/New_York';
     const ev = evaluateShift(new Date(), agentConfig.shift_schedule, tz);
     if (ev.off_shift_no_wake) return { mode: 'no_wake' };
-    if (ev.off_shift_emergency_only) return { mode: 'emergency_only_no_tag' };
+    if (ev.off_shift_emergency_only) {
+      if (cron.emergency_allowed) return null;
+      return { mode: 'emergency_only_no_tag' };
+    }
     return null;
   }
 

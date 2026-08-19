@@ -716,6 +716,108 @@ describe('AgentManager.evaluateCronShiftSuppression - wake_on_fire bypass', () =
   });
 });
 
+describe('AgentManager.evaluateCronShiftSuppression - emergency_allowed (dead-code fix, 2026-08-19)', () => {
+  // Regression target: emergency_allowed was defined on CronDefinition/CronEntry
+  // and documented ("allowed to fire during off_shift_emergency_only windows")
+  // but evaluateCronShiftSuppression never read it — every cron in
+  // off_shift_emergency_only was suppressed regardless of the flag. Found while
+  // investigating a real overnight WO-detection gap (task_1787141008458_10208705).
+  // Four-way matrix: {wake_on_fire, emergency_allowed} x {off_shift_no_wake, off_shift_emergency_only}.
+
+  const baseCron = {
+    name: 'test-cron',
+    prompt: 'do thing',
+    schedule: '15 11 * * *',
+    enabled: true,
+    created_at: '2026-05-12T00:00:00.000Z',
+  };
+
+  // Same 09:00-17:00 UTC weekday window as the wake_on_fire suite, but WITH an
+  // emergency_override allowlist — per shift.ts's offShiftClassification, a
+  // non-empty off_shift_can_wake_for switches off-shift from no_wake to
+  // emergency_only.
+  const emergencyOnlySchedule = {
+    weekly: {
+      mon: { start: '09:00', end: '17:00' },
+      tue: { start: '09:00', end: '17:00' },
+      wed: { start: '09:00', end: '17:00' },
+      thu: { start: '09:00', end: '17:00' },
+      fri: { start: '09:00', end: '17:00' },
+      sat: 'off' as const,
+      sun: 'off' as const,
+    },
+    emergency_override: { off_shift_can_wake_for: ['life-safety'] },
+  };
+
+  // No emergency_override at all → strict off_shift_no_wake (same shape as the
+  // wake_on_fire suite's offShiftSchedule, redefined here so this describe block
+  // is independently readable).
+  const noWakeSchedule = {
+    weekly: {
+      mon: { start: '09:00', end: '17:00' },
+      tue: { start: '09:00', end: '17:00' },
+      wed: { start: '09:00', end: '17:00' },
+      thu: { start: '09:00', end: '17:00' },
+      fri: { start: '09:00', end: '17:00' },
+      sat: 'off' as const,
+      sun: 'off' as const,
+    },
+  };
+
+  function makeManager(shift_schedule: any): any {
+    const am = new AgentManager('test-instance', '/tmp/x', '/tmp/x', 'acme');
+    const fakeProcess = { config: { shift_schedule, timezone: 'UTC' } } as any;
+    (am as any).agents.set('alice', { process: fakeProcess, checker: {} });
+    return am;
+  }
+
+  beforeEach(() => {
+    // Same off-shift instant as the wake_on_fire suite: Tuesday 04:00 UTC,
+    // outside both schedules' 09:00-17:00 window.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-12T04:00:00Z'));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('off_shift_emergency_only + emergency_allowed:true → fires (the fix)', () => {
+    const am = makeManager(emergencyOnlySchedule);
+    const cron = { ...baseCron, emergency_allowed: true };
+    const result = (am as any).evaluateCronShiftSuppression('alice', cron);
+    expect(result).toBeNull();
+  });
+
+  it('off_shift_emergency_only + no emergency_allowed → still suppressed (mode emergency_only_no_tag)', () => {
+    const am = makeManager(emergencyOnlySchedule);
+    const result = (am as any).evaluateCronShiftSuppression('alice', baseCron);
+    expect(result).toEqual({ mode: 'emergency_only_no_tag' });
+  });
+
+  it('off_shift_no_wake + emergency_allowed:true → still suppressed — emergency_allowed does not reach into the stricter no_wake mode', () => {
+    const am = makeManager(noWakeSchedule);
+    const cron = { ...baseCron, emergency_allowed: true };
+    const result = (am as any).evaluateCronShiftSuppression('alice', cron);
+    expect(result).toEqual({ mode: 'no_wake' });
+  });
+
+  it('off_shift_emergency_only + wake_on_fire:true → fires — wake_on_fire bypasses both modes, not just no_wake', () => {
+    const am = makeManager(emergencyOnlySchedule);
+    const cron = { ...baseCron, wake_on_fire: true };
+    const result = (am as any).evaluateCronShiftSuppression('alice', cron);
+    expect(result).toBeNull();
+  });
+
+  it('in-shift + emergency_allowed:true → fires (emergency_allowed is a no-op when already in-shift)', () => {
+    vi.setSystemTime(new Date('2026-05-12T10:00:00Z')); // inside 09:00-17:00
+    const am = makeManager(emergencyOnlySchedule);
+    const cron = { ...baseCron, emergency_allowed: true };
+    const result = (am as any).evaluateCronShiftSuppression('alice', cron);
+    expect(result).toBeNull();
+  });
+});
+
 describe('AgentManager.startAgent - F3 fix (activity-channel poller gets resolved org on restart path)', () => {
   // F3 regression target: restartAgent() and the queued pendingRestarts path
   // call startAgent(name, '') — no org argument. startAgent computes
