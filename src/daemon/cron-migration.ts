@@ -171,7 +171,7 @@ function convertEntry(
   entry: CronEntry,
   agentName: string,
 ): { cron: CronDefinition } | { skip: string } {
-  const { name, type, interval, cron: cronExpr, fire_at, prompt, wake_on_fire } = entry;
+  const { name, type, interval, cron: cronExpr, fire_at, prompt, wake_on_fire, emergency_allowed } = entry;
 
   // Treat absent `type` as "recurring" (spec requirement)
   const effectiveType = type ?? 'recurring';
@@ -192,6 +192,7 @@ function convertEntry(
       description: `Migrated from config.json (was disabled)`,
       metadata: { migrated_from_config: true, original_type: effectiveType },
       ...(wake_on_fire ? { wake_on_fire: true } : {}),
+      ...(emergency_allowed ? { emergency_allowed: true } : {}),
     };
     return { cron: def };
   }
@@ -245,6 +246,7 @@ function convertEntry(
     created_at: new Date().toISOString(),
     metadata: { migrated_from_config: true, original_type: effectiveType },
     ...(wake_on_fire ? { wake_on_fire: true } : {}),
+    ...(emergency_allowed ? { emergency_allowed: true } : {}),
   };
 
   return { cron: def };
@@ -566,6 +568,7 @@ const CONFIG_AUTHORITATIVE_FIELDS = [
   'schedule',
   'enabled',
   'wake_on_fire',
+  'emergency_allowed',
 ] as const;
 
 export interface ReloadOptions {
@@ -694,6 +697,7 @@ export function reloadCronsForAgent(
           existing.schedule !== newDef.schedule ||
           existing.enabled !== newDef.enabled ||
           (existing.wake_on_fire ?? false) !== (newDef.wake_on_fire ?? false) ||
+          (existing.emergency_allowed ?? false) !== (newDef.emergency_allowed ?? false) ||
           (newDef.description !== undefined && existing.description !== newDef.description);
         if (definitionChanged) {
           result.updated.push(newDef.name);

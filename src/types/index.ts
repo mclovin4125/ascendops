@@ -602,6 +602,22 @@ export interface CronDefinition {
    * @default false (off-shift suppression applies — opt-out model)
    */
   wake_on_fire?: boolean;
+
+  /**
+   * When true, this cron fires during `off_shift_emergency_only` windows
+   * (an agent's shift_schedule has `emergency_override.off_shift_can_wake_for`
+   * configured) without bypassing the stricter `off_shift_no_wake` mode the
+   * way `wake_on_fire` does. Use for crons that should get the softer,
+   * emergency-only exemption — e.g. a detection-only scan that should still
+   * respect a "no schedule configured at all" no-wake default — rather than
+   * always firing regardless of shift state.
+   *
+   * Mirrors `CronEntry.emergency_allowed` (config.json seed shape); propagated
+   * to crons.json by `bus reload-crons` the same way `wake_on_fire` is.
+   *
+   * @default false (off-shift suppression applies — opt-out model)
+   */
+  emergency_allowed?: boolean;
 }
 
 // ---------------------------------------------------------------------------

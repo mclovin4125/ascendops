@@ -278,4 +278,50 @@ describe('cross-PR cron pipeline: reload-crons + daemon refresh', () => {
     logSpy.mockRestore();
     errSpy.mockRestore();
   });
+
+  it('propagates emergency_allowed flag from config.json to state crons.json on reload, and toggles cleanly', async () => {
+    // Sibling of the wake_on_fire propagation test above — emergency_allowed is
+    // the softer, off_shift_emergency_only-only exemption (see
+    // AgentManager.evaluateCronShiftSuppression). Same CONFIG_AUTHORITATIVE_FIELDS
+    // contract: reload must carry the flag through on first sync and clear it
+    // when the operator removes it from config.json.
+
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockIpcSend.mockResolvedValue({ success: true, data: 'mocked' });
+
+    // 1. Initial reload — flag set true in config.
+    writeAgentConfig([
+      {
+        name: 'emergency-only-cron',
+        cron: '0 3 * * *',
+        prompt: 'Detection-only scan, safe to run during an emergency-only window.',
+        type: 'recurring',
+        emergency_allowed: true,
+      },
+    ]);
+    await busCommand.parseAsync(['node', 'bus', 'reload-crons', AGENT, '--json']);
+    let state = readStateCrons();
+    expect(state).toHaveLength(1);
+    expect(state[0].name).toBe('emergency-only-cron');
+    expect(state[0].emergency_allowed).toBe(true);
+
+    // 2. Operator removes the flag in config — second reload must clear it
+    //    in state (proves emergency_allowed is in CONFIG_AUTHORITATIVE_FIELDS).
+    writeAgentConfig([
+      {
+        name: 'emergency-only-cron',
+        cron: '0 3 * * *',
+        prompt: 'Detection-only scan, safe to run during an emergency-only window.',
+        type: 'recurring',
+      },
+    ]);
+    await busCommand.parseAsync(['node', 'bus', 'reload-crons', AGENT, '--json']);
+    state = readStateCrons();
+    expect(state).toHaveLength(1);
+    expect(state[0].emergency_allowed).toBeFalsy();
+
+    logSpy.mockRestore();
+    errSpy.mockRestore();
+  });
 });
