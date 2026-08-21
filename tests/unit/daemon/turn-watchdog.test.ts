@@ -402,6 +402,82 @@ describe('stalled-turn watchdog (WS-B)', () => {
     expect(agent.sessionRefresh).toHaveBeenCalledTimes(1);
   });
 
+  async function flushPromises(times = 5): Promise<void> {
+    for (let i = 0; i < times; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise<void>((resolve) => queueMicrotask(resolve));
+    }
+  }
+
+  it('captures a host-load snapshot to watchdog-load.log the moment a stall is first detected', async () => {
+    const agent = createAgent();
+    vi.mocked(execFile).mockImplementation((_cmd, _args, _optsOrCb, maybeCb?) => {
+      const callback = typeof _optsOrCb === 'function' ? _optsOrCb : maybeCb;
+      (callback as unknown as (err: null, stdout: string) => void)(null, 'mock output\n');
+      return {} as ReturnType<typeof execFile>;
+    });
+    const checker = createChecker(agent);
+    armWatchdog(checker);
+    agent.setLastInjectedAt(now - 31 * 60_000);
+
+    checker.watchdogCheck();
+    await flushPromises();
+
+    const logPath = join(paths.logDir, 'watchdog-load.log');
+    expect(existsSync(logPath)).toBe(true);
+    const lines = readFileSync(logPath, 'utf-8').trim().split('\n');
+    expect(lines).toHaveLength(1);
+    const record = JSON.parse(lines[0]);
+    expect(record).toEqual(expect.objectContaining({
+      agent: 'member-agent',
+      stalled_minutes: 31,
+      vm_stat: 'mock output',
+      top_summary: 'mock output',
+    }));
+    expect(Array.isArray(record.loadavg_1_5_15)).toBe(true);
+  });
+
+  it('writes only one load snapshot across repeated polls of the same stalled turn', async () => {
+    const agent = createAgent();
+    vi.mocked(execFile).mockImplementation((_cmd, _args, _optsOrCb, maybeCb?) => {
+      const callback = typeof _optsOrCb === 'function' ? _optsOrCb : maybeCb;
+      (callback as unknown as (err: null, stdout: string) => void)(null, 'mock output\n');
+      return {} as ReturnType<typeof execFile>;
+    });
+    const checker = createChecker(agent);
+    armWatchdog(checker);
+    agent.setLastInjectedAt(now - 31 * 60_000);
+
+    checker.watchdogCheck();
+    await flushPromises();
+    checker.watchdogCheck();
+    await flushPromises();
+
+    const logPath = join(paths.logDir, 'watchdog-load.log');
+    const lines = readFileSync(logPath, 'utf-8').trim().split('\n');
+    expect(lines).toHaveLength(1);
+  });
+
+  it('does not let a load-snapshot subprocess failure block the recovery path', async () => {
+    const agent = createAgent();
+    vi.mocked(execFile).mockImplementation((_cmd, _args, _optsOrCb, maybeCb?) => {
+      const callback = typeof _optsOrCb === 'function' ? _optsOrCb : maybeCb;
+      (callback as unknown as (err: Error) => void)(new Error('command not found'));
+      return {} as ReturnType<typeof execFile>;
+    });
+    const checker = createChecker(agent);
+    armWatchdog(checker);
+    agent.setLastInjectedAt(now - 31 * 60_000);
+
+    checker.watchdogCheck();
+    await flushPromises();
+
+    expect(agent.sessionRefresh).toHaveBeenCalledTimes(1);
+    const logPath = join(paths.logDir, 'watchdog-load.log');
+    const record = JSON.parse(readFileSync(logPath, 'utf-8').trim());
+    expect(record.vm_stat).toContain('error: command not found');
+  });
+
   it('caps a large stdout delta read while retaining meaningful tail output', () => {
     const lengths: number[] = [];
     const fileRangeOps = {

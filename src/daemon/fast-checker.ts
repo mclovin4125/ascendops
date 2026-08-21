@@ -1,5 +1,6 @@
-import { readdirSync, readFileSync, existsSync, writeFileSync, unlinkSync, statSync, openSync, readSync, closeSync, watch, type FSWatcher } from 'fs';
+import { readdirSync, readFileSync, existsSync, writeFileSync, appendFileSync, unlinkSync, statSync, openSync, readSync, closeSync, watch, type FSWatcher } from 'fs';
 import { execFile } from 'child_process';
+import { loadavg } from 'os';
 import { join } from 'path';
 import { createHash } from 'crypto';
 import { hardRestart } from '../bus/system.js';
@@ -229,6 +230,7 @@ export class FastChecker {
   private readonly STDOUT_FROZEN_MS = 30 * 60 * 1000;
   private turnWatchdogThresholdMs: number = 30 * 60 * 1000;
   private turnWatchdogRecoveryFile: string = '';
+  private watchdogLoadLogFile: string = '';
   private turnWatchdogRecoveries: number[] = [];
   private turnWatchdogRecoveryStateValid: boolean = true;
   private turnWatchdogAlertedInjectAt: number = 0;
@@ -417,6 +419,7 @@ export class FastChecker {
     this.loadDedupHashes();
     this.watchdogRestartMarkerFile = join(paths.stateDir, '.watchdog-restart-at');
     this.turnWatchdogRecoveryFile = join(paths.stateDir, '.turn-watchdog-recoveries.json');
+    this.watchdogLoadLogFile = join(paths.logDir, 'watchdog-load.log');
     this.loadTurnWatchdogRecoveries();
 
     // Initialize Gmail watch
@@ -1442,6 +1445,12 @@ export class FastChecker {
     this.turnHung = true;
     if (this.turnWatchdogAlertedInjectAt === lastInjectAt) return;
     this.turnWatchdogAlertedInjectAt = lastInjectAt;
+    // Snapshot host load the moment the hang is first detected — once per
+    // hang (gated on the same lastInjectAt dedup as the alert below, not
+    // every poll cycle) — so the NEXT recurrence has real data instead of
+    // the retroactive guesswork the 2026-08-21 correlated-hang investigation
+    // was stuck with. Fire-and-forget: must never delay recovery below.
+    this.captureWatchdogLoadSnapshot(now, Math.floor(stalledMs / 60_000));
     this.loadTurnWatchdogRecoveries();
     this.turnWatchdogRecoveries = this.turnWatchdogRecoveries.filter(
       (timestamp) => now - timestamp < this.TURN_WATCHDOG_WINDOW_MS,
@@ -1480,6 +1489,7 @@ export class FastChecker {
         threshold_minutes: this.turnWatchdogThresholdMs / 60_000,
         recovery_count_6h: this.turnWatchdogRecoveries.length,
         action,
+        load_snapshot_log: 'watchdog-load.log',
       });
     } catch (err) {
       this.log(`WATCHDOG HUNG bus-event failure: ${err instanceof Error ? err.message : String(err)}`);
@@ -1515,6 +1525,63 @@ export class FastChecker {
     this.preserveRecentHandoffDoc();
     this.agent.sessionRefresh(`stalled-turn watchdog recovery: ${reason}`)
       .catch((err) => this.log(`Stalled-turn session refresh failed: ${err}`));
+  }
+
+  /**
+   * Best-effort host-load snapshot, captured the instant a stalled turn is
+   * first detected. Appended as a JSON line to `watchdog-load.log` in the
+   * same log directory as `crashes.log`, keyed by timestamp so a future
+   * incident can be correlated across both files by eye.
+   *
+   * Written because the 2026-08-21 correlated-hang investigation (analyst
+   * and dev hung within 1s of each other, 83min each) could only produce a
+   * leading hypothesis — host contention vs. a shared daemon-side polling
+   * bottleneck — with no contemporaneous CPU/memory data to confirm either
+   * way. This closes that gap for the next occurrence.
+   *
+   * Deliberately fire-and-forget and fully isolated from the recovery path:
+   * `execFile` failures, a missing binary, or a slow subprocess must never
+   * delay or block `handleStalledTurn`'s alert/recovery logic above.
+   */
+  private captureWatchdogLoadSnapshot(nowMs: number, stalledMinutes: number): void {
+    const timestamp = new Date(nowMs).toISOString();
+    let loadavg1_5_15: number[] = [];
+    try {
+      loadavg1_5_15 = loadavg();
+    } catch {
+      // best-effort only
+    }
+
+    const runCommand = (cmd: string, args: string[]): Promise<string> => new Promise((resolve) => {
+      try {
+        execFile(cmd, args, { timeout: 5_000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
+          resolve(err ? `error: ${err.message}` : stdout.trim());
+        });
+      } catch (err) {
+        resolve(`error: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    });
+
+    Promise.all([
+      runCommand('vm_stat', []),
+      runCommand('top', ['-l', '1', '-n', '0']),
+    ]).then(([vmStat, topSummary]) => {
+      const record = {
+        timestamp,
+        agent: this.agent.name,
+        stalled_minutes: stalledMinutes,
+        loadavg_1_5_15: loadavg1_5_15,
+        vm_stat: vmStat,
+        top_summary: topSummary,
+      };
+      try {
+        appendFileSync(this.watchdogLoadLogFile, `${JSON.stringify(record)}\n`);
+      } catch (err) {
+        this.log(`WATCHDOG load-snapshot write failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }).catch((err) => {
+      this.log(`WATCHDOG load-snapshot capture failed: ${err instanceof Error ? err.message : String(err)}`);
+    });
   }
 
   private loadTurnWatchdogRecoveries(): void {
