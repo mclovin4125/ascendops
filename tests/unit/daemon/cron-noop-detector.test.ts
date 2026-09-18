@@ -18,6 +18,33 @@ function transcriptLine(timestamp: string, content: unknown): string {
   }) + '\n';
 }
 
+/** A real assistant turn that issued a tool call - what proves a cron fire was actually executed. */
+function toolUseLine(timestamp: string, toolName = 'Bash'): string {
+  return JSON.stringify({
+    type: 'assistant',
+    message: { role: 'assistant', content: [{ type: 'tool_use', name: toolName, input: {} }] },
+    timestamp,
+  }) + '\n';
+}
+
+/**
+ * The synthetic, tool-free placeholder the CLI emits when it cannot reach the
+ * model at all (e.g. an expired login) - salt lands in the transcript right on
+ * schedule, but nothing executed. This must NOT count as confirmation.
+ */
+function authErrorLine(timestamp: string): string {
+  return JSON.stringify({
+    type: 'assistant',
+    message: {
+      role: 'assistant',
+      model: '<synthetic>',
+      content: [{ type: 'text', text: 'Not logged in · Please run /login' }],
+    },
+    isApiErrorMessage: true,
+    timestamp,
+  }) + '\n';
+}
+
 describe('cron-noop-detector transcript lookup', () => {
   let testDir: string;
 
@@ -43,7 +70,7 @@ describe('cron-noop-detector transcript lookup', () => {
     expect(resolveClaudeTranscriptPath({}, launchDir, testDir)).toBe(newestByMtime);
   });
 
-  it('matches salted cron turns when message.content is a block array', () => {
+  it('matches salted cron turns when message.content is a block array and a tool call follows', () => {
     const firedAt = '2026-06-17T12:00:00.000Z';
     const salt = cronFireSalt(firedAt, 'heartbeat');
     const transcript = join(testDir, 'session.jsonl');
@@ -51,7 +78,7 @@ describe('cron-noop-detector transcript lookup', () => {
       transcript,
       transcriptLine('2026-06-17T12:00:01.000Z', [
         { type: 'text', text: `prefix ${salt}: Read HEARTBEAT.md` },
-      ]),
+      ]) + toolUseLine('2026-06-17T12:00:02.000Z'),
     );
 
     expect(transcriptContainsCronTurn(transcript, salt, firedAt).found).toBe(true);
@@ -64,7 +91,8 @@ describe('cron-noop-detector transcript lookup', () => {
     const transcript = join(testDir, 'session.jsonl');
     writeFileSync(
       transcript,
-      transcriptLine('2026-06-17T12:00:01.000Z', `${fooBarSalt} Run foo-bar`),
+      transcriptLine('2026-06-17T12:00:01.000Z', `${fooBarSalt} Run foo-bar`) +
+        toolUseLine('2026-06-17T12:00:02.000Z'),
     );
 
     expect(transcriptContainsCronTurn(transcript, fooSalt, firedAt).found).toBe(false);
@@ -79,7 +107,7 @@ describe('cron-noop-detector transcript lookup', () => {
     );
   });
 
-  it('finds salted cron turns even when verbose output pushes them beyond the old tail window', () => {
+  it('finds salted cron turns even when verbose output pushes the confirming tool call beyond the old tail window', () => {
     const firedAt = '2026-06-17T12:00:00.000Z';
     const salt = cronFireSalt(firedAt, 'heartbeat');
     const transcript = join(testDir, 'session.jsonl');
@@ -90,10 +118,60 @@ describe('cron-noop-detector transcript lookup', () => {
     }) + '\n';
     writeFileSync(
       transcript,
-      transcriptLine('2026-06-17T12:00:01.000Z', `${salt}: Read HEARTBEAT.md`) + largeAssistantLine,
+      transcriptLine('2026-06-17T12:00:01.000Z', `${salt}: Read HEARTBEAT.md`) +
+        largeAssistantLine +
+        toolUseLine('2026-06-17T12:00:03.000Z'),
     );
 
     expect(transcriptContainsCronTurn(transcript, salt, firedAt).found).toBe(true);
+  });
+
+  // 2026-09-18 fleet-wide incident: a Claude CLI login expiry made every turn return a
+  // synthetic, tool-free "Login expired" placeholder for ~24 days. The salt still landed
+  // in the transcript on schedule, so the old salt-only check falsely confirmed every fire.
+  it('does not confirm when the salted turn is followed only by a synthetic auth-error placeholder', () => {
+    const firedAt = '2026-06-17T12:00:00.000Z';
+    const salt = cronFireSalt(firedAt, 'heartbeat');
+    const transcript = join(testDir, 'session.jsonl');
+    writeFileSync(
+      transcript,
+      transcriptLine('2026-06-17T12:00:01.000Z', `${salt}: Read HEARTBEAT.md`) +
+        authErrorLine('2026-06-17T12:00:02.000Z'),
+    );
+
+    expect(transcriptContainsCronTurn(transcript, salt, firedAt).found).toBe(false);
+  });
+
+  it('confirms a tool call reached through intervening non-assistant rows (attachments, system events)', () => {
+    const firedAt = '2026-06-17T12:00:00.000Z';
+    const salt = cronFireSalt(firedAt, 'heartbeat');
+    const transcript = join(testDir, 'session.jsonl');
+    const attachmentLine = JSON.stringify({ type: 'attachment', timestamp: '2026-06-17T12:00:01.500Z' }) + '\n';
+    const systemLine = JSON.stringify({ type: 'system', timestamp: '2026-06-17T12:00:01.700Z' }) + '\n';
+    writeFileSync(
+      transcript,
+      transcriptLine('2026-06-17T12:00:01.000Z', `${salt}: Read HEARTBEAT.md`) +
+        attachmentLine +
+        systemLine +
+        toolUseLine('2026-06-17T12:00:02.000Z'),
+    );
+
+    expect(transcriptContainsCronTurn(transcript, salt, firedAt).found).toBe(true);
+  });
+
+  it('does not attribute a tool call belonging to a later, unrelated user turn to this fire', () => {
+    const firedAt = '2026-06-17T12:00:00.000Z';
+    const salt = cronFireSalt(firedAt, 'heartbeat');
+    const transcript = join(testDir, 'session.jsonl');
+    writeFileSync(
+      transcript,
+      transcriptLine('2026-06-17T12:00:01.000Z', `${salt}: Read HEARTBEAT.md`) +
+        authErrorLine('2026-06-17T12:00:02.000Z') +
+        transcriptLine('2026-06-17T13:00:00.000Z', 'unrelated later message') +
+        toolUseLine('2026-06-17T13:00:01.000Z'),
+    );
+
+    expect(transcriptContainsCronTurn(transcript, salt, firedAt).found).toBe(false);
   });
 });
 
@@ -170,13 +248,39 @@ describe('CronNoopDetector', () => {
       const firedAt = '2026-06-17T12:00:00.000Z';
       const salt = cronFireSalt(firedAt, cronName);
       transcriptPath = join(testDir, 'session.jsonl');
-      writeFileSync(transcriptPath, transcriptLine('2026-06-17T12:00:02.000Z', `${salt}: Read HEARTBEAT.md`));
+      writeFileSync(
+        transcriptPath,
+        transcriptLine('2026-06-17T12:00:02.000Z', `${salt}: Read HEARTBEAT.md`) +
+          toolUseLine('2026-06-17T12:00:03.000Z'),
+      );
 
       register(makeDetector(), firedAt);
       await vi.advanceTimersByTimeAsync(verifyDelayMs);
 
       expect(logs.map((l) => l.status)).toEqual(['confirmed']);
       expect(injects).toHaveLength(0);
+    } finally {
+      rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not confirm a salted turn answered only by a synthetic auth-error placeholder (falls through to the noop path)', async () => {
+    const testDir = mkdtempSync(join(tmpdir(), 'cron-noop-autherr-'));
+    try {
+      const firedAt = '2026-06-17T12:00:00.000Z';
+      const salt = cronFireSalt(firedAt, cronName);
+      transcriptPath = join(testDir, 'session.jsonl');
+      writeFileSync(
+        transcriptPath,
+        transcriptLine('2026-06-17T12:00:02.000Z', `${salt}: Read HEARTBEAT.md`) +
+          authErrorLine('2026-06-17T12:00:03.000Z'),
+      );
+
+      register(makeDetector(), firedAt);
+      await vi.advanceTimersByTimeAsync(verifyDelayMs);
+
+      expect(logs.map((l) => l.status)).toEqual(['noop_unconfirmed']);
+      expect(events.map((e) => e.event)).toEqual(['cron_fire_unconfirmed']);
     } finally {
       rmSync(testDir, { recursive: true, force: true });
     }
@@ -227,7 +331,11 @@ describe('CronNoopDetector', () => {
       register(makeDetector(), firedAt);
 
       await vi.advanceTimersByTimeAsync(verifyDelayMs);
-      writeFileSync(transcriptPath, transcriptLine('2026-06-17T12:00:01.500Z', `${salt}: Read HEARTBEAT.md`));
+      writeFileSync(
+        transcriptPath,
+        transcriptLine('2026-06-17T12:00:01.500Z', `${salt}: Read HEARTBEAT.md`) +
+          toolUseLine('2026-06-17T12:00:02.000Z'),
+      );
       await vi.advanceTimersByTimeAsync(verifyDelayMs);
 
       expect(logs.map((l) => l.status)).toEqual(['noop_unconfirmed', 'confirmed']);
@@ -306,7 +414,11 @@ describe('CronNoopDetector', () => {
 
       await vi.advanceTimersByTimeAsync(verifyDelayMs);
       await vi.advanceTimersByTimeAsync(verifyDelayMs);
-      writeFileSync(transcriptPath, transcriptLine('2026-06-17T12:00:02.500Z', `${originalSalt}: Read HEARTBEAT.md`));
+      writeFileSync(
+        transcriptPath,
+        transcriptLine('2026-06-17T12:00:02.500Z', `${originalSalt}: Read HEARTBEAT.md`) +
+          toolUseLine('2026-06-17T12:00:03.000Z'),
+      );
       await vi.advanceTimersByTimeAsync(verifyDelayMs);
 
       expect(injects).toHaveLength(1);

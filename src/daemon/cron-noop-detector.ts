@@ -59,6 +59,32 @@ function contentContainsSalt(content: unknown, salt: string): boolean {
   }
 }
 
+/**
+ * A salted user turn only proves the daemon *delivered* the cron prompt into the
+ * transcript - the daemon injects it unconditionally, whether or not the CLI can
+ * actually process it. It does not prove the agent *executed* anything.
+ *
+ * 2026-09-18 fleet-wide incident: a Claude Code CLI login expiry made every turn
+ * on all 4 agent seats return a synthetic `isApiErrorMessage` placeholder ("Not
+ * logged in / Login expired - Please run /login") for ~24 days. The salt still
+ * landed in every `type: "user"` row right on schedule, so this detector marked
+ * 240+ dead fires "confirmed" and never escalated - the one safety net built for
+ * exactly this failure mode was blind to it. See memory/2026-09-18.md.
+ *
+ * Fix: a real cron execution always issues at least one tool call (bus commands
+ * for heartbeat/inbox/etc per HEARTBEAT.md). Require a genuine `tool_use` block
+ * in an assistant turn following the salted user turn before calling it found.
+ */
+function hasRealToolUse(row: any): boolean {
+  if (row?.type !== 'assistant') return false;
+  const content = row?.message?.content;
+  if (!Array.isArray(content)) return false;
+  return content.some((block: any) => block && typeof block === 'object' && block.type === 'tool_use');
+}
+
+/** How many rows past a salted user turn to search for a confirming tool_use. */
+const TOOL_USE_LOOKAHEAD_ROWS = 50;
+
 export function transcriptContainsCronTurn(
   transcriptPath: string | null,
   salt: string,
@@ -82,24 +108,38 @@ function transcriptContainsAnyCronTurn(
   if (parsedCandidates.length === 0) return { found: false, path: transcriptPath };
 
   try {
+    const rows: any[] = [];
     const transcript = readFileSync(transcriptPath, 'utf-8');
     for (const line of transcript.split('\n')) {
       const trimmed = line.trim();
       if (!trimmed) continue;
-      let row: any;
       try {
-        row = JSON.parse(trimmed);
+        rows.push(JSON.parse(trimmed));
       } catch {
-        continue;
+        // skip malformed lines but keep their index out of `rows`
       }
+    }
+
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
       if (row?.type !== 'user') continue;
       const tsMs = Date.parse(String(row.timestamp || ''));
       if (!Number.isFinite(tsMs)) continue;
       const matched = parsedCandidates.some((candidate) =>
         tsMs >= candidate.firedMs && contentContainsSalt(row?.message?.content, candidate.salt),
       );
-      if (matched) {
-        return { found: true, path: transcriptPath };
+      if (!matched) continue;
+
+      // Salt delivered - now look for proof the agent actually acted on it.
+      // Stop at the next user turn so a much later, unrelated tool call in the
+      // same long-running session can't be misattributed to this fire.
+      const windowEnd = Math.min(rows.length, i + 1 + TOOL_USE_LOOKAHEAD_ROWS);
+      for (let j = i + 1; j < windowEnd; j++) {
+        const candidateRow = rows[j];
+        if (candidateRow?.type === 'user') break;
+        if (hasRealToolUse(candidateRow)) {
+          return { found: true, path: transcriptPath };
+        }
       }
     }
   } catch {
