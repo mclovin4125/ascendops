@@ -1097,7 +1097,7 @@ export class FastChecker {
       this.stdoutLastSize = size;
       this.stdoutLastChangeAt = now;
     }
-    this.syncTurnWatchdogInjection();
+    const lastInjectAt = this.syncTurnWatchdogInjection();
     this.trackMeaningfulOutput(stdoutPath, size, now);
 
     // Read tail once — shared by Signals 3 and 4
@@ -1152,15 +1152,64 @@ export class FastChecker {
         // evidence the session is stuck — same bar Signal 2/turn-watchdog
         // already use for "is this session actually frozen," just checked
         // fast here instead of waiting the full 30min.
+        //
+        // 2026-09-19 fix (task_1789819581918_26377237, analyst handoff): that
+        // bar was checked wrong in two ways, both confirmed against 26
+        // fleet-wide restarts:
+        //
+        // (1) stdoutHighWater never advanced on the benign branch, so once a
+        // survey landed in the trailing window it stayed "unread" for the
+        // rest of the session — every later tick re-evaluated the SAME old
+        // occurrence, so the first quiet 10-minute stretch afterwards (e.g.
+        // an agent idling normally between cron fires) restarted it, no
+        // matter how long ago or how unrelated to that quiet stretch the
+        // survey actually was. Fixed by persisting the highwater past this
+        // occurrence on every exit from this branch, restart or not.
+        //
+        // (2) meaningfulOutputStale treated `lastMeaningfulOutputAt === 0` as
+        // maximally stale. syncTurnWatchdogInjection() (called above, before
+        // this block) resets that field to 0 on every fresh injection — so a
+        // survey already sitting in the window plus a cron/Telegram/agent
+        // message landing this same tick read as "stale forever" and could
+        // hard-restart the session before it had even one poll cycle to
+        // start responding. Fixed by folding the last injection time into the
+        // staleness baseline (mirroring checkStalledTurn's `progressAt`), so
+        // a same-tick reset runs the clock from the injection moment, not
+        // from "since the beginning of time."
+        //
+        // A genuinely idle agent (Stop-hook flag newer than the last
+        // injection, i.e. checkStalledTurn's `!turnOpen`) is exempted from
+        // staleness entirely — it cleanly finished its last turn and is
+        // waiting for new work, so producing no output is expected, not
+        // evidence of being stuck. This is what actually killed the observed
+        // idle-between-cron-cycles restarts: with no open turn, the baseline
+        // above is old by definition and would otherwise always read stale.
+        // A session with no tracked injection at all (lastInjectAt === 0,
+        // e.g. never received one, or a stale marker predating this
+        // FastChecker instance) is NOT covered by this exemption — it falls
+        // through to the staleness check same as before, so a session that
+        // is simply stuck with no injection history to explain the silence
+        // still restarts (Signal 2/checkStalledTurn stay the authority for
+        // anything actually mid-turn; this signal keeps its original,
+        // broader "is this session frozen at all" scope otherwise).
         const SURVEY_GRACE_MS = 10 * 60 * 1000;
-        const meaningfulOutputStale =
-          this.lastMeaningfulOutputAt === 0 || now - this.lastMeaningfulOutputAt >= SURVEY_GRACE_MS;
+        const idleAt = this.readIdleTimestamp();
+        const isIdle = lastInjectAt > 0 && Math.floor(lastInjectAt / 1000) * 1000 <= idleAt;
+        const meaningfulOutputStale = !isIdle
+          && now - Math.max(lastInjectAt, this.lastMeaningfulOutputAt) >= SURVEY_GRACE_MS;
         if (meaningfulOutputStale) {
           this.log('WATCHDOG: ctx-exhaustion survey prompt detected with no recent meaningful output — hard-restarting');
           this.triggerHardRestart('ctx exhaustion: session survey prompt in stdout with stalled output', size);
           return;
         }
-        this.log('WATCHDOG: session-survey prompt detected but output is active — treating as benign, not restarting');
+        this.log(
+          isIdle
+            ? 'WATCHDOG: session-survey prompt detected but agent is idle (turn closed) — treating as benign, not restarting'
+            : 'WATCHDOG: session-survey prompt detected but output is active — treating as benign, not restarting',
+        );
+        // Advance past this occurrence regardless of why it was judged benign,
+        // so it is never re-evaluated on a later, unrelated quiet stretch.
+        this.persistWatchdogRestartMarker(restartMarker.restartedAt, size);
       }
     }
 

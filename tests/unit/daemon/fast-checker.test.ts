@@ -2045,6 +2045,107 @@ describe('FastChecker', () => {
       expect(agent.hardRestartSelf).toHaveBeenCalledTimes(1);
     });
 
+    // 2026-09-19 fix (task_1789819581918_26377237, analyst handoff): a stale
+    // survey plus a genuinely idle agent (Stop-hook flag newer than the last
+    // injection) used to restart anyway — lack of new output from an agent
+    // that cleanly finished its turn and is waiting for the next cron/message
+    // is expected, not evidence of being stuck. This is the shape analyst
+    // confirmed against real restarts (e.g. analyst's 02:05Z kill, idle since
+    // its own back-online message ~24min earlier).
+    it('does not restart on a stale survey when the agent is idle (turn closed) per the Stop-hook flag', () => {
+      const stdoutPath = join(paths.logDir, 'stdout.log');
+      const survey = 'How is Claude doing this session?';
+      const agent = makeAgentWithDir(join(testDir, 'agent-survey-idle'));
+      const checker = new FastChecker(agent, paths, '/framework') as any;
+      checker.bootstrappedAt = Date.now() - checker.BOOTSTRAP_GRACE_MS - 1;
+
+      const injectedAt = Date.now() - 30 * 60 * 1000;
+      checker.lastMessageInjectedAt = injectedAt;
+      // Idle flag written AFTER the injection — the agent finished that turn
+      // cleanly and has been sitting idle since, same as checkStalledTurn's
+      // `!turnOpen`.
+      writeFileSync(
+        join(paths.stateDir, 'last_idle.flag'),
+        String(Math.floor((injectedAt + 5000) / 1000)),
+        'utf-8',
+      );
+
+      writeFileSync(stdoutPath, survey, 'utf-8');
+      checker.watchdogCheck();
+
+      expect(agent.hardRestartSelf).not.toHaveBeenCalled();
+    });
+
+    // 2026-09-19 fix, second half of the same handoff: syncTurnWatchdogInjection
+    // resets lastMeaningfulOutputAt to 0 on every fresh injection, and the old
+    // code read 0 as "stale since forever." A survey already sitting in the
+    // trailing window plus a brand-new injection landing this same tick could
+    // hard-restart the session before it had a single poll cycle to respond.
+    it('does not restart on a stale survey the same tick a fresh injection resets lastMeaningfulOutputAt to 0', () => {
+      const stdoutPath = join(paths.logDir, 'stdout.log');
+      const survey = 'How is Claude doing this session?';
+      const agent = makeAgentWithDir(join(testDir, 'agent-survey-fresh-inject'));
+      const checker = new FastChecker(agent, paths, '/framework') as any;
+      checker.bootstrappedAt = Date.now() - checker.BOOTSTRAP_GRACE_MS - 1;
+
+      // Survey already present from earlier in the session — corroborated as
+      // benign in spirit (no output since), but a message is injected right
+      // as this tick's watchdogCheck runs. No idle flag: this is a genuinely
+      // open turn, not the idle case covered by the test above.
+      writeFileSync(stdoutPath, survey, 'utf-8');
+      checker.lastMessageInjectedAt = Date.now();
+
+      checker.watchdogCheck();
+
+      expect(agent.hardRestartSelf).not.toHaveBeenCalled();
+    });
+
+    // 2026-09-19 fix, third piece: once a survey is judged benign, the old
+    // code never advanced stdoutHighWater, so that same occurrence was
+    // re-evaluated on every later tick — the first unrelated 10-minute quiet
+    // stretch afterwards (idle between cron fires, waiting on a tool, etc.)
+    // restarted it regardless of how stale or unrelated the original survey
+    // actually was. Confirmed against 26 fleet-wide restarts landing in pairs
+    // 25:00 apart (15min hard-restart cooldown + 10min survey grace on the
+    // fresh session hitting the same bug again).
+    it('advances stdoutHighWater once a survey is judged benign, so a later unrelated quiet stretch does not re-trigger it', () => {
+      const nowSpy = vi.spyOn(Date, 'now');
+      try {
+        const start = 1_780_580_000_000;
+        nowSpy.mockReturnValue(start);
+        const stdoutPath = join(paths.logDir, 'stdout.log');
+        const survey = 'How is Claude doing this session?';
+        const agent = makeAgentWithDir(join(testDir, 'agent-survey-benign-advance'));
+        const checker = new FastChecker(agent, paths, '/framework') as any;
+        checker.bootstrappedAt = start - checker.BOOTSTRAP_GRACE_MS - 1;
+
+        // Establish a meaningful-output baseline, then land the survey
+        // alongside genuine new output — judged benign, same shape as the
+        // 2026-07-28 false-positive-fix test above.
+        writeFileSync(stdoutPath, 'startup output', 'utf-8');
+        checker.watchdogCheck();
+        writeFileSync(stdoutPath, `startup output\n${survey}\nReal tool output line`, 'utf-8');
+        checker.watchdogCheck();
+        expect(agent.hardRestartSelf).not.toHaveBeenCalled();
+
+        const afterBenign = JSON.parse(readFileSync(join(paths.stateDir, '.watchdog-restart-at'), 'utf-8'));
+        expect(afterBenign.stdoutHighWater).toBe(statSync(stdoutPath).size);
+
+        // Time passes, the agent goes quiet (no new stdout at all) for well
+        // past the 10-minute survey grace window. The old code would
+        // re-detect the same survey text still sitting in the trailing
+        // window and restart here; the highwater advance means Signal 1's
+        // `size > stdoutHighWater` gate is now false, so it is not
+        // re-evaluated at all.
+        nowSpy.mockReturnValue(start + 15 * 60 * 1000);
+        checker.watchdogCheck();
+
+        expect(agent.hardRestartSelf).not.toHaveBeenCalled();
+      } finally {
+        nowSpy.mockRestore();
+      }
+    });
+
     it('detects a new survey even when more than 20KB of output follows it', () => {
       const stdoutPath = join(paths.logDir, 'stdout.log');
       const priorOutput = 'handled survey from previous session';
