@@ -1209,6 +1209,16 @@ export class FastChecker {
         );
         // Advance past this occurrence regardless of why it was judged benign,
         // so it is never re-evaluated on a later, unrelated quiet stretch.
+        //
+        // TRADEOFF (analyst review, 2026-09-19): once judged benign, this
+        // specific survey occurrence is never re-checked by Signal 1 for the
+        // rest of the session, even if the agent later genuinely freezes. A
+        // real freeze after this point relies entirely on Signal 2
+        // (checkStalledTurn) and the turn watchdog to catch it — acceptable
+        // because those are the correct, purpose-built detectors for "is
+        // this session actually stuck mid-turn" (30min threshold, idle-flag
+        // aware), whereas Signal 1 was only ever a fast, coarse proxy using
+        // this survey text as an opportunistic early signal.
         this.persistWatchdogRestartMarker(restartMarker.restartedAt, size);
       }
     }

@@ -1932,6 +1932,13 @@ describe('FastChecker', () => {
       expect(log).toHaveBeenCalledWith('Telegram watchdog hard-restart notification sent: ctx threshold fallback: agent ignored graceful restart');
     });
 
+    // 2026-09-19 (analyst review on task_1789819581918_26377237): these tests
+    // predate this describe block's actual topic (handoff-doc preservation) -
+    // grouped here so Signal 1 (survey-prompt watchdog) has one findable home
+    // instead of being scattered under an unrelated label. Not reindented to
+    // avoid an unrelated mass-diff; content and behavior are unchanged.
+    describe('Signal 1 — survey-prompt watchdog', () => {
+
     it('suppresses stale survey-prompt re-fire by high-water and fires on new survey output', () => {
       const nowSpy = vi.spyOn(Date, 'now');
       try {
@@ -2199,6 +2206,8 @@ describe('FastChecker', () => {
 
       expect(agent.hardRestartSelf).not.toHaveBeenCalled();
     });
+
+    }); // end describe('Signal 1 — survey-prompt watchdog')
 
     it('does not lose meaningful output buried before the trailing cap on an oversized delta (2026-08-08)', () => {
       // Regression test for the stalled-turn watchdog delta-cap gap found while
