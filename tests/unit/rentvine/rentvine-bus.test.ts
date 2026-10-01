@@ -93,4 +93,44 @@ describe('bus/rentvine — credential loading', () => {
 
     await expect(getRentVineLeaseBalances()).resolves.toEqual([{ lease: {}, balances: {} }]);
   });
+
+  it('getRentVineWorkOrders walks pages past the 15-newest default and filters to open-only', async () => {
+    resolveEnvMock.mockReturnValue({ agentDir: '' });
+    parseEnvFileMock.mockReturnValue({});
+    process.env.RENTVINE_ACCOUNT_CODE = 'lfh';
+    process.env.RENTVINE_API_KEY = 'k';
+    process.env.RENTVINE_API_SECRET = 's';
+
+    const fullPage = Array.from({ length: 100 }, (_, i) => ({ workOrderID: i + 1, dateClosed: null }));
+    const shortPage = [
+      { workOrderID: 101, dateClosed: null },
+      { workOrderID: 102, dateClosed: '2026-01-01' },
+    ];
+    workOrdersMock.mockResolvedValueOnce(fullPage).mockResolvedValueOnce(shortPage);
+    const { getRentVineWorkOrders } = await import('../../../src/bus/rentvine.js');
+
+    const result = await getRentVineWorkOrders();
+
+    expect(workOrdersMock).toHaveBeenCalledTimes(2);
+    expect(workOrdersMock).toHaveBeenNthCalledWith(1, { pageSize: '100', page: '1' });
+    expect(workOrdersMock).toHaveBeenNthCalledWith(2, { pageSize: '100', page: '2' });
+    expect(result).toHaveLength(101);
+    expect(result.map((wo) => wo.workOrderID)).toContain(101);
+    expect(result.map((wo) => wo.workOrderID)).not.toContain(102);
+  });
+
+  it('getRentVineWorkOrders stops after a single short page', async () => {
+    resolveEnvMock.mockReturnValue({ agentDir: '' });
+    parseEnvFileMock.mockReturnValue({});
+    process.env.RENTVINE_ACCOUNT_CODE = 'lfh';
+    process.env.RENTVINE_API_KEY = 'k';
+    process.env.RENTVINE_API_SECRET = 's';
+    workOrdersMock.mockResolvedValueOnce([{ workOrderID: 1, dateClosed: null }]);
+    const { getRentVineWorkOrders } = await import('../../../src/bus/rentvine.js');
+
+    const result = await getRentVineWorkOrders();
+
+    expect(workOrdersMock).toHaveBeenCalledTimes(1);
+    expect(result).toEqual([{ workOrderID: 1, dateClosed: null }]);
+  });
 });

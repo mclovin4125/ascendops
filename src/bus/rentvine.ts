@@ -59,8 +59,29 @@ function loadRentVineAuth(): RentVineAuth {
 // on missing credentials, and callers expect a rejected promise (these are
 // documented as async operations), not a synchronous throw out of a
 // nominally Promise-returning function.
+
+/**
+ * Confirmed live against the real account (2026-09-30): calling
+ * maintenance/work-orders with zero params silently returns only the 15
+ * newest by internal id — not an error, not documented, just the default
+ * page. `pageSize` and `page` are both honored (tested up to pageSize=1000,
+ * no server-side cap hit). There is no honored open/closed filter — isClosed,
+ * dateClosed, status, and isOpen query params were all tried and silently
+ * ignored, full set returned regardless. `dateClosed` is null on an open
+ * work order, so filtering happens client-side after the full pull.
+ */
+const WORK_ORDERS_PAGE_SIZE = 100;
+const WORK_ORDERS_MAX_PAGES = 50; // safety cap: 5,000 records, well beyond this account's volume (~80 total)
+
 export async function getRentVineWorkOrders(): Promise<RentVineWorkOrder[]> {
-  return new RentVineAPI(loadRentVineAuth()).workOrders();
+  const api = new RentVineAPI(loadRentVineAuth());
+  const all: RentVineWorkOrder[] = [];
+  for (let page = 1; page <= WORK_ORDERS_MAX_PAGES; page++) {
+    const batch = await api.workOrders({ pageSize: String(WORK_ORDERS_PAGE_SIZE), page: String(page) });
+    all.push(...batch);
+    if (batch.length < WORK_ORDERS_PAGE_SIZE) break;
+  }
+  return all.filter((wo) => wo.dateClosed == null);
 }
 
 export async function getRentVineVendors(): Promise<RentVineVendor[]> {
