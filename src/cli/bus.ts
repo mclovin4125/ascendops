@@ -16,7 +16,7 @@ import { selfRestart, hardRestart, autoCommit, ensureGitRepoInitialized, checkGo
 import { createExperiment, runExperiment, evaluateExperiment, listExperiments, gatherContext, manageCycle, loadExperimentConfig } from '../bus/experiment.js';
 import { browseCatalog, installCommunityItem, prepareSubmission, submitCommunityItem } from '../bus/catalog.js';
 import { collectMetrics, parseUsageOutput, storeUsageData, checkUpstream, findStrandedBranches, collectTelegramCommands, registerTelegramCommands } from '../bus/metrics.js';
-import { createApproval, updateApproval, correctApproval } from '../bus/approval.js';
+import { createApproval, updateApproval, correctApproval, markApprovalReminded } from '../bus/approval.js';
 import { listActiveThreads, addActiveThread, updateActiveThread, removeActiveThread, clearActiveThreads } from '../bus/active-threads.js';
 import { listVendorDocPatterns, vendorDocPattern } from '../bus/vendor-patterns.js';
 import { createReminder, listReminders, ackReminder, pruneReminders } from '../bus/reminders.js';
@@ -1721,6 +1721,24 @@ busCommand
       console.log(`Approval ${id} flagged as corrected.`);
     } catch (err: any) {
       console.error(`Failed to correct approval: ${err.message || err}`);
+      process.exit(1);
+    }
+  });
+
+busCommand
+  .command('mark-approval-reminded')
+  .description('Record that a reminder nudge was sent for a still-pending approval. Storage + CLI primitive only — the check-approvals cron prompt still decides timing. See markApprovalReminded in bus/approval.ts.')
+  .argument('<id>', 'Approval ID (must still be pending)')
+  .option('--step <n>', 'Reminder step reached (0=never,1=1h,2=2h,3=4h,4=8h,5=daily)')
+  .action((id: string, opts: { step?: string }) => {
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    try {
+      const step = opts.step !== undefined ? parseInt(opts.step, 10) : undefined;
+      markApprovalReminded(paths, id, step);
+      console.log(`Approval ${id} marked reminded${step !== undefined ? ` (step ${step})` : ''}.`);
+    } catch (err: any) {
+      console.error(`Failed to mark approval reminded: ${err.message || err}`);
       process.exit(1);
     }
   });

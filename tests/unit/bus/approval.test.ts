@@ -28,7 +28,7 @@ vi.mock('../../../src/telegram/api', () => ({
 import { mkdtempSync, rmSync, readdirSync, readFileSync, existsSync, writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { createApproval, updateApproval, correctApproval, listPendingApprovals } from '../../../src/bus/approval';
+import { createApproval, updateApproval, correctApproval, listPendingApprovals, markApprovalReminded } from '../../../src/bus/approval';
 import type { BusPaths } from '../../../src/types';
 
 let testDir: string;
@@ -535,5 +535,52 @@ describe('listPendingApprovals', () => {
     const pending = listPendingApprovals(paths);
     expect(pending).toHaveLength(1);
     expect(pending[0].id).toBe(id1);
+  });
+});
+
+describe('markApprovalReminded (structured reminder-backoff tracking)', () => {
+  it('sets last_reminded_at and reminder_step on the pending file, and both surface via listPendingApprovals', async () => {
+    const id = await createApproval(paths, 'alice', 'TestOrg', 'Needs a nudge', 'deployment', undefined, frameworkRoot);
+
+    markApprovalReminded(paths, id, 2);
+
+    const file = join(paths.approvalDir, 'pending', `${id}.json`);
+    const onDisk = JSON.parse(readFileSync(file, 'utf-8'));
+    expect(onDisk.last_reminded_at).toBeTruthy();
+    expect(onDisk.reminder_step).toBe(2);
+
+    const [listed] = listPendingApprovals(paths);
+    expect(listed.last_reminded_at).toBe(onDisk.last_reminded_at);
+    expect(listed.reminder_step).toBe(2);
+  });
+
+  it('does not move or resolve the approval — it stays pending', async () => {
+    const id = await createApproval(paths, 'alice', 'TestOrg', 'Needs a nudge', 'deployment', undefined, frameworkRoot);
+
+    markApprovalReminded(paths, id, 1);
+
+    expect(existsSync(join(paths.approvalDir, 'pending', `${id}.json`))).toBe(true);
+    expect(existsSync(join(paths.approvalDir, 'resolved', `${id}.json`))).toBe(false);
+  });
+
+  it('step is optional — only last_reminded_at is set when omitted', async () => {
+    const id = await createApproval(paths, 'alice', 'TestOrg', 'Needs a nudge', 'deployment', undefined, frameworkRoot);
+
+    markApprovalReminded(paths, id);
+
+    const onDisk = JSON.parse(readFileSync(join(paths.approvalDir, 'pending', `${id}.json`), 'utf-8'));
+    expect(onDisk.last_reminded_at).toBeTruthy();
+    expect(onDisk.reminder_step).toBeUndefined();
+  });
+
+  it('refuses with a distinct error when the approval is already resolved', async () => {
+    const id = await createApproval(paths, 'alice', 'TestOrg', 'Will be resolved', 'deployment', undefined, frameworkRoot);
+    updateApproval(paths, id, 'approved');
+
+    expect(() => markApprovalReminded(paths, id, 1)).toThrow(/already resolved/);
+  });
+
+  it('throws a clear error when the approval id does not exist at all', () => {
+    expect(() => markApprovalReminded(paths, 'approval_999_nope', 1)).toThrow(/not found/);
   });
 });

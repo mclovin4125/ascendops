@@ -377,6 +377,44 @@ export function correctApproval(
 }
 
 /**
+ * Record that a reminder nudge was sent for a still-pending approval.
+ * Storage + CLI primitive only — the check-approvals cron prompt still
+ * decides when to remind and at what step; this closes the gap where that
+ * decision was inferred each cycle from prose in daily memory, which does
+ * not scale as the approval queue grows.
+ *
+ * Only touches last_reminded_at/reminder_step on the pending file — same
+ * atomic read-modify-write pattern as updateApproval, but does not move or
+ * resolve the record. Only applies to a still-pending approval: if it has
+ * already been resolved, there is nothing left to remind about, so this
+ * throws a distinct error rather than silently writing a stale pending copy
+ * (an approval resolved between reminder cycles is expected to never gain
+ * these fields — not an error case, nothing to special-case here).
+ */
+export function markApprovalReminded(
+  paths: BusPaths,
+  approvalId: string,
+  step?: number,
+): void {
+  const pendingFile = join(paths.approvalDir, 'pending', `${approvalId}.json`);
+  let approval: Approval;
+  try {
+    approval = JSON.parse(readFileSync(pendingFile, 'utf-8'));
+  } catch (err) {
+    const resolvedFile = join(paths.approvalDir, 'resolved', `${approvalId}.json`);
+    if (existsSync(resolvedFile)) {
+      throw new Error(`approval ${approvalId} is already resolved — no reminder needed`);
+    }
+    throw new Error(`approval ${approvalId} not found: ${err}`);
+  }
+
+  approval.last_reminded_at = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+  if (step !== undefined) approval.reminder_step = step;
+
+  atomicWriteSync(pendingFile, JSON.stringify(approval));
+}
+
+/**
  * Default: flag a pending approval unresolved for 3h+.
  *
  * Deliberately set BELOW the default 4h heartbeat cadence, not equal to it.

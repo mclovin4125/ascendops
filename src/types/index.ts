@@ -159,6 +159,16 @@ export interface Approval {
   correction_note?: string;
   corrected_at?: string;
   corrected_by?: string;
+  /**
+   * Set by markApprovalReminded (bus/approval.ts) each time a reminder nudge
+   * is sent for a still-pending approval. Storage only — the check-approvals
+   * cron prompt still decides when to remind and at what step; this just
+   * gives it a precise value to read instead of inferring backoff timing
+   * from daily memory prose. An approval resolved between reminder cycles
+   * simply never gets these fields — not an error case, nothing to special-case.
+   */
+  last_reminded_at?: string;
+  reminder_step?: number;
 }
 
 // Agent Config Types (config.json)
