@@ -6,6 +6,7 @@ import { randomDigits } from '../utils/random.js';
 import { validatePriority, validateTaskId } from '../utils/validate.js';
 import { redactSSN } from '../utils/ssn-redaction.js';
 import { logEvent } from './event.js';
+import { hasApprovalFromAgentSince } from './approval.js';
 
 /**
  * Create a new task. Identical JSON format to bash create-task.sh.
@@ -21,6 +22,7 @@ export function createTask(
     priority?: Priority;
     project?: string;
     needsApproval?: boolean;
+    producesApproval?: boolean;
     dueDate?: string;
     blockedBy?: string[];
     blocks?: string[];
@@ -32,6 +34,7 @@ export function createTask(
     priority = 'normal',
     project = '',
     needsApproval = false,
+    producesApproval = false,
     dueDate = '',
     blockedBy = [],
     blocks = [],
@@ -84,6 +87,7 @@ export function createTask(
     description: redactSSN(description),
     type: 'agent',
     needs_approval: needsApproval,
+    produces_approval: producesApproval,
     status: 'pending',
     assigned_to: assignee,
     created_by: agentName,
@@ -605,12 +609,16 @@ export function completeTask(
   let prevStatus: TaskStatus | undefined;
   let assignee: string | undefined;
   let taskOrg: string = '';
+  let producesApproval: boolean = false;
+  let taskCreatedAt: string = '';
   try {
     const content = readFileSync(filePath, 'utf-8');
     const task: Task = JSON.parse(content);
     prevStatus = task.status;
     assignee = task.assigned_to;
     taskOrg = task.org || '';
+    producesApproval = task.produces_approval ?? false;
+    taskCreatedAt = task.created_at;
     task.status = 'completed';
     task.updated_at = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
     task.completed_at = task.updated_at;
@@ -625,26 +633,55 @@ export function completeTask(
 
   // Activity-feed event. Best-effort — the task is already persisted.
   if (assignee) {
+    // Cross-org completion (caller's org ≠ task's org) is allowed via
+    // findTaskFile, but the caller's `paths.analyticsDir`/`approvalDir` are
+    // scoped to the caller's org. Rewrite both to the task's actual org so
+    // dashboards/metrics and the approval check below see the right tree.
+    // Only rewrite when the resolved task path is in the nested cross-org
+    // layout: <ctxRoot>/orgs/<org>/tasks/<taskId>.json. Flat/single-org test
+    // harnesses use <ctxRoot>/tasks + <ctxRoot>/analytics and should keep
+    // the caller-provided paths unchanged.
+    const pathOrgMatch = filePath.match(/[\\/]orgs[\\/](?<org>[^\\/]+)[\\/]tasks[\\/]/);
+    const fileOrg = pathOrgMatch?.groups?.org || '';
+    const eventPaths: BusPaths = fileOrg
+      ? {
+          ...paths,
+          analyticsDir: join(paths.ctxRoot, 'orgs', fileOrg, 'analytics'),
+          approvalDir: join(paths.ctxRoot, 'orgs', fileOrg, 'approvals'),
+        }
+      : paths;
+
     try {
-      // Cross-org completion (caller's org ≠ task's org) is allowed via
-      // findTaskFile, but the caller's `paths.analyticsDir` is scoped to
-      // the caller's org. Rewrite the analytics path to the task's actual
-      // org so dashboards/metrics see the completion under the right tree.
-      // Only rewrite analyticsDir when the resolved task path is in the
-      // nested cross-org layout: <ctxRoot>/orgs/<org>/tasks/<taskId>.json.
-      // Flat/single-org test harnesses use <ctxRoot>/tasks + <ctxRoot>/analytics
-      // and should keep the caller-provided analyticsDir unchanged.
-      const pathOrgMatch = filePath.match(/[\\/]orgs[\\/](?<org>[^\\/]+)[\\/]tasks[\\/]/);
-      const fileOrg = pathOrgMatch?.groups?.org || '';
-      const eventPaths: BusPaths = fileOrg
-        ? { ...paths, analyticsDir: join(paths.ctxRoot, 'orgs', fileOrg, 'analytics') }
-        : paths;
       logEvent(eventPaths, assignee, taskOrg, 'task', 'task_completed', 'info', {
         task_id: taskId,
         ...(result ? { result } : {}),
       });
     } catch {
       // Never let observability break task completion.
+    }
+
+    // Warn-only check for task_1790978499142_30559609: a task opted into
+    // --produces-approval should have a filed approval record by the time
+    // it's marked complete, not just a Telegram/task note (the exact gap
+    // caught 2026-08-10 and 2026-10-01). Never blocks completion — a
+    // legitimate exception can exist, this is visibility, not a gate.
+    if (producesApproval) {
+      try {
+        const filed = hasApprovalFromAgentSince(eventPaths, assignee, taskCreatedAt);
+        if (!filed) {
+          console.warn(
+            `[task] WARNING: ${taskId} is marked --produces-approval but no approval record ` +
+            `from ${assignee} was found created at/after ${taskCreatedAt}. File one with ` +
+            `create-approval if this wasn't already covered elsewhere.`,
+          );
+          logEvent(eventPaths, assignee, taskOrg, 'action', 'guardrail_triggered', 'warning', {
+            guardrail: 'overnight-build-missing-approval',
+            task_id: taskId,
+          });
+        }
+      } catch {
+        // Never let this check break task completion.
+      }
     }
   }
 }

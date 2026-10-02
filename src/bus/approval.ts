@@ -438,3 +438,41 @@ export function listPendingApprovals(paths: BusPaths): Approval[] {
     (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
   );
 }
+
+/**
+ * True if any approval — pending OR resolved — was requested by `agentName`
+ * at or after `sinceIso`. Used by completeTask's produces_approval check: a
+ * task can legitimately complete before its approval is decided, so this
+ * checks for the approval's EXISTENCE on disk, not whether it has resolved.
+ * `>=` rather than strictly-after: created_at timestamps are second-precision
+ * (see the `.replace(/\.\d{3}Z$/, 'Z')` convention used when they're written),
+ * so a same-second approval filed immediately after the task record should
+ * still count as evidence something was filed.
+ */
+export function hasApprovalFromAgentSince(
+  paths: BusPaths,
+  agentName: string,
+  sinceIso: string,
+): boolean {
+  const sinceMs = new Date(sinceIso).getTime();
+  for (const subdir of ['pending', 'resolved']) {
+    const dir = join(paths.approvalDir, subdir);
+    let files: string[];
+    try {
+      files = readdirSync(dir).filter((f) => f.endsWith('.json'));
+    } catch {
+      continue;
+    }
+    for (const file of files) {
+      try {
+        const approval: Approval = JSON.parse(readFileSync(join(dir, file), 'utf-8'));
+        if (approval.requesting_agent === agentName && new Date(approval.created_at).getTime() >= sinceMs) {
+          return true;
+        }
+      } catch {
+        // Skip corrupt
+      }
+    }
+  }
+  return false;
+}

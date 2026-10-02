@@ -330,6 +330,92 @@ describe('Task Management', () => {
       expect(evt.metadata.task_id).toBe(taskId);
       expect(evt.metadata.result).toBe('shipped');
     });
+
+    describe('--produces-approval warn-only check (task_1790978499142_30559609)', () => {
+      let warnLog: string[];
+      let originalWarn: typeof console.warn;
+
+      beforeEach(() => {
+        warnLog = [];
+        originalWarn = console.warn;
+        console.warn = (...args: unknown[]) => {
+          warnLog.push(args.map((a) => String(a)).join(' '));
+        };
+      });
+
+      afterEach(() => {
+        console.warn = originalWarn;
+      });
+
+      function readGuardrailEvents(agent: string): Array<Record<string, any>> {
+        const today = new Date().toISOString().split('T')[0];
+        const eventFile = join(paths.analyticsDir, 'events', agent, `${today}.jsonl`);
+        if (!existsSync(eventFile)) return [];
+        return readFileSync(eventFile, 'utf-8')
+          .trim()
+          .split('\n')
+          .filter(Boolean)
+          .map((line) => JSON.parse(line))
+          .filter((e) => e.event === 'guardrail_triggered');
+      }
+
+      function writeApproval(id: string, requestingAgent: string, createdAt: string): void {
+        mkdirSync(join(paths.approvalDir, 'pending'), { recursive: true });
+        writeFileSync(join(paths.approvalDir, 'pending', `${id}.json`), JSON.stringify({
+          id,
+          title: 'Test approval',
+          requesting_agent: requestingAgent,
+          org: 'acme',
+          category: 'deployment',
+          status: 'pending',
+          description: '',
+          created_at: createdAt,
+          updated_at: createdAt,
+          resolved_at: null,
+          resolved_by: null,
+        }), 'utf-8');
+      }
+
+      it('warns and logs a guardrail event when flagged and no approval exists', () => {
+        const taskId = createTask(paths, 'paul', 'acme', 'Overnight build', {
+          assignee: 'boris',
+          producesApproval: true,
+        });
+
+        completeTask(paths, taskId, 'branch pushed');
+
+        expect(warnLog.some((w) => w.includes(taskId) && w.includes('produces-approval'))).toBe(true);
+        const guardrailEvents = readGuardrailEvents('boris');
+        expect(guardrailEvents).toHaveLength(1);
+        expect(guardrailEvents[0].metadata.guardrail).toBe('overnight-build-missing-approval');
+        expect(guardrailEvents[0].metadata.task_id).toBe(taskId);
+      });
+
+      it('does not warn when a matching approval already exists', () => {
+        const taskId = createTask(paths, 'paul', 'acme', 'Overnight build', {
+          assignee: 'boris',
+          producesApproval: true,
+        });
+        const task = JSON.parse(readFileSync(join(paths.taskDir, `${taskId}.json`), 'utf-8'));
+        writeApproval('approval_test_1', 'boris', task.created_at);
+
+        completeTask(paths, taskId, 'branch pushed');
+
+        expect(warnLog).toHaveLength(0);
+        expect(readGuardrailEvents('boris')).toHaveLength(0);
+      });
+
+      it('does not warn when the flag is unset', () => {
+        const taskId = createTask(paths, 'paul', 'acme', 'Ordinary task', {
+          assignee: 'boris',
+        });
+
+        completeTask(paths, taskId, 'done');
+
+        expect(warnLog).toHaveLength(0);
+        expect(readGuardrailEvents('boris')).toHaveLength(0);
+      });
+    });
   });
 
   describe('listTasks', () => {

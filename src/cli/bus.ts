@@ -484,10 +484,11 @@ busCommand
   .option('--priority <p>', 'Priority (urgent, high, normal, low)', 'normal')
   .option('--project <name>', 'Project name')
   .option('--needs-approval', 'Require human approval before execution')
+  .option('--produces-approval', 'This task\'s completion should have a filed approval record — complete-task warns (does not block) if none exists from the assignee created at/after this task\'s creation')
   .option('--blocked-by <ids>', 'Comma-separated task IDs that must complete before this task can progress')
   .option('--blocks <ids>', 'Comma-separated task IDs that this new task will block (symmetric reverse edge)')
   .option('--force', 'Create even if the --assignee agent does not exist (intentional pre-provisioning)', false)
-  .action((title: string, opts: { desc?: string; assignee?: string; priority: string; project?: string; needsApproval?: boolean; blockedBy?: string; blocks?: string; force?: boolean }) => {
+  .action((title: string, opts: { desc?: string; assignee?: string; priority: string; project?: string; needsApproval?: boolean; producesApproval?: boolean; blockedBy?: string; blocks?: string; force?: boolean }) => {
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     // Fail loud on a phantom assignee BEFORE createTask() — no task is created
@@ -504,6 +505,7 @@ busCommand
       priority: opts.priority as Priority,
       project: opts.project,
       needsApproval: opts.needsApproval ?? false,
+      producesApproval: opts.producesApproval ?? false,
       blockedBy: parseList(opts.blockedBy),
       blocks: parseList(opts.blocks),
     });

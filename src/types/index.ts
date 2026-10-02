@@ -72,6 +72,17 @@ export interface Task {
    */
   blocks?: string[];
   blocked_by?: string[];
+  /**
+   * Opt-in flag (create-task --produces-approval): this task's completion
+   * is expected to have a filed approval record, not just a Telegram/task
+   * note. completeTask warns (does not block) when this is true and no
+   * approval from the task's assignee exists created at/after created_at —
+   * closes the repeated gap (2026-08-10, 2026-10-01) where a finished
+   * overnight branch had no formal approval filed. Deliberately not a
+   * title-pattern guess: too fragile across agents, so this is explicit
+   * per-task opt-in instead.
+   */
+  produces_approval?: boolean;
 }
 
 // Event Types
