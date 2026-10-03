@@ -520,9 +520,15 @@ export class FastChecker {
       // clobbers that same wrong record, masking this heartbeat mechanism's
       // per-agent staleness signal entirely. Same fix pattern already used by
       // handleStalledTurn's heartbeat annotation below.
+      //
+      // The org passed here had the SAME bug independently: `process.env.CTX_ORG`
+      // reads the daemon process's own ambient env, not this agent's — confirmed
+      // 2026-10-03 (analyst) landing as org=ascendops on ea's heartbeat.json.
+      // resolveAgentOrg() derives it from this.paths instead, same as the rest
+      // of this fix already does for agent/paths.
       try {
         updateHeartbeat(this.paths, agentName, `[watchdog] ${agentName} alive — idle session ${ts}`, {
-          org: process.env.CTX_ORG ?? '',
+          org: this.resolveAgentOrg(),
         });
       } catch (err) {
         this.log(`Heartbeat watchdog error: ${err instanceof Error ? err.message : String(err)}`);
@@ -1037,6 +1043,21 @@ export class FastChecker {
    * Safe to call from any timer — the gap is measured between calls, so a
    * caller that runs more often than LIVENESS_TICK_MS only tightens detection.
    */
+  /**
+   * Derive this agent's org for the in-process watchdog heartbeat writes.
+   * NOT from `process.env.CTX_ORG` — that reads the DAEMON process's own
+   * ambient env, not this specific agent's, and was confirmed 2026-10-03
+   * (analyst) landing as org=ascendops on ea's heartbeat.json. `stateDir`
+   * (where heartbeat.json itself lives) is flat/per-agent with no org
+   * segment, so this reads a sibling org-scoped field already on the same
+   * correctly-resolved `this.paths` object instead — same regex pattern
+   * already used by completeTask's cross-org org extraction in bus/task.ts.
+   * Returns '' (matching the prior fallback) for a flat/no-org paths shape.
+   */
+  private resolveAgentOrg(): string {
+    return this.paths.approvalDir.match(/[\\/]orgs[\\/](?<org>[^\\/]+)[\\/]/)?.groups?.org ?? '';
+  }
+
   private noteLiveness(now: number = Date.now()): void {
     const previous = this.lastLivenessAt;
     this.lastLivenessAt = now;
@@ -1490,7 +1511,7 @@ export class FastChecker {
         this.paths,
         this.agent.name,
         `[watchdog] ${this.agent.name} HUNG - ${reason}; ${action}`,
-        { org: process.env.CTX_ORG ?? '' },
+        { org: this.resolveAgentOrg() },
       );
     } catch (err) {
       this.log(`WATCHDOG HUNG heartbeat annotation failed: ${err instanceof Error ? err.message : String(err)}`);

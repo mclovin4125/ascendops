@@ -974,6 +974,49 @@ describe('FastChecker', () => {
       checker.wake();
     });
 
+    it('derives org from this agent\'s own paths, not the daemon\'s ambient CTX_ORG (2026-10-03 analyst fix)', async () => {
+      // Regression guard: the watchdog heartbeat writer passed
+      // `org: process.env.CTX_ORG ?? ''` — the DAEMON process's own ambient
+      // env, not this specific agent's. Confirmed landing as org=ascendops
+      // on ea's heartbeat.json. Build a nested orgs/<org>/ paths shape (what
+      // resolvePaths actually produces) and set CTX_ORG to a DIFFERENT,
+      // wrong value to prove the fix reads from paths, not the env var.
+      const orgTestDir = mkdtempSync(join(tmpdir(), 'fast-checker-org-test-'));
+      const orgPaths: BusPaths = {
+        ctxRoot: orgTestDir,
+        inbox: join(orgTestDir, 'inbox'),
+        inflight: join(orgTestDir, 'inflight'),
+        processed: join(orgTestDir, 'processed'),
+        logDir: join(orgTestDir, 'logs'),
+        stateDir: join(orgTestDir, 'state', 'my-agent'),
+        taskDir: join(orgTestDir, 'orgs', 'lane-family-homes', 'tasks'),
+        approvalDir: join(orgTestDir, 'orgs', 'lane-family-homes', 'approvals'),
+        analyticsDir: join(orgTestDir, 'orgs', 'lane-family-homes', 'analytics'),
+        heartbeatDir: join(orgTestDir, 'heartbeats'),
+        deliverablesDir: join(orgTestDir, 'orgs', 'lane-family-homes', 'deliverables'),
+      };
+      for (const dir of Object.values(orgPaths)) mkdirSync(dir, { recursive: true });
+      writeFileSync(join(orgPaths.stateDir, '.onboarded'), '');
+
+      const originalCtxOrg = process.env.CTX_ORG;
+      process.env.CTX_ORG = 'ascendops'; // wrong on purpose — must not leak into the write
+
+      try {
+        const agent = createMockAgent('my-agent');
+        const checker = new FastChecker(agent, orgPaths, '/tmp/framework');
+        checker.start();
+        await vi.advanceTimersByTimeAsync(50 * 60 * 1000);
+        const heartbeat = JSON.parse(readFileSync(join(orgPaths.stateDir, 'heartbeat.json'), 'utf-8'));
+        expect(heartbeat.org).toBe('lane-family-homes');
+        checker.stop();
+        checker.wake();
+      } finally {
+        if (originalCtxOrg === undefined) delete process.env.CTX_ORG;
+        else process.env.CTX_ORG = originalCtxOrg;
+        rmSync(orgTestDir, { recursive: true, force: true });
+      }
+    });
+
     it('suppresses the false alive heartbeat while a turn is marked HUNG', async () => {
       writeFileSync(join(paths.stateDir, '.onboarded'), '');
       const agent = createMockAgent('my-agent');
