@@ -757,6 +757,66 @@ export function listTasks(
 }
 
 /**
+ * Loose, backward-looking signal for "this completed task probably produced
+ * something that needed a filed approval" — title/result text mentioning a
+ * merge, branch, push, or deploy. ONLY used as a fallback for tasks with
+ * `produces_approval` unset: the explicit flag (create-task --produces-approval,
+ * checked by completeTask's warn-check) is the precise, non-fragile signal
+ * for anything created going forward. This exists because every task
+ * completed before that flag existed (and any created without passing it)
+ * has no way to opt in retroactively — a periodic audit is the only way to
+ * surface those. Deliberately loose: false positives here just mean a human
+ * reviews and dismisses an audit line, not a blocked task.
+ */
+const APPROVAL_COVERAGE_HEURISTIC = /\b(merge|merged|branch|pushed|deploy|deployed)\b/i;
+
+export interface ApprovalCoverageGap {
+  task_id: string;
+  title: string;
+  assignee: string;
+  completed_at: string | null;
+  /** 'flag' when produces_approval was explicitly set; otherwise the matched heuristic word. */
+  matched_signal: string;
+}
+
+/**
+ * S3 (2026-10-01 self-eval, task_1791030564618_07839867): cross-reference
+ * completed tasks against the approval table so a finished-but-unfiled
+ * branch doesn't rely solely on the complete-task warn-check firing once at
+ * completion time. Read-only, side-effect-free — intended to run at
+ * heartbeat time or on demand, surfacing gaps for a human/agent to review,
+ * never blocking or auto-filing anything.
+ */
+export function auditApprovalCoverage(
+  paths: BusPaths,
+  options: { agent?: string } = {},
+): ApprovalCoverageGap[] {
+  const completed = listTasks(paths, { status: 'completed', agent: options.agent });
+  const gaps: ApprovalCoverageGap[] = [];
+
+  for (const task of completed) {
+    const explicitFlag = task.produces_approval === true;
+    const heuristicMatch = explicitFlag
+      ? null
+      : `${task.title} ${task.result ?? ''}`.match(APPROVAL_COVERAGE_HEURISTIC);
+    if (!explicitFlag && !heuristicMatch) continue;
+
+    const filed = hasApprovalFromAgentSince(paths, task.assigned_to, task.created_at);
+    if (filed) continue;
+
+    gaps.push({
+      task_id: task.id,
+      title: task.title,
+      assignee: task.assigned_to,
+      completed_at: task.completed_at,
+      matched_signal: explicitFlag ? 'flag' : (heuristicMatch as RegExpMatchArray)[0],
+    });
+  }
+
+  return gaps;
+}
+
+/**
  * Helper: read all task JSON files from a directory (non-recursive).
  */
 function readAllTasks(taskDir: string): Task[] {

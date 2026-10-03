@@ -5,7 +5,7 @@ import { join, dirname } from 'path';
 import { sendMessage, checkInbox, ackInbox, pruneProcessed, PROCESSED_TTL_DAYS, PROCESSED_TTL_MIN_DAYS } from '../bus/message.js';
 import { agentExists, listAgents } from '../bus/agents.js';
 import { validateAgentName, isValidJson, validateTaskId } from '../utils/validate.js';
-import { createTask, updateTask, completeTask, claimTask, readTaskAudit, checkTaskDependencies, compactTasks, listTasks, checkStaleTasks, archiveTasks, checkHumanTasks } from '../bus/task.js';
+import { createTask, updateTask, completeTask, claimTask, readTaskAudit, checkTaskDependencies, compactTasks, listTasks, checkStaleTasks, archiveTasks, checkHumanTasks, auditApprovalCoverage } from '../bus/task.js';
 import { saveOutput } from '../bus/save-output.js';
 import { logEvent } from '../bus/event.js';
 import { redactSSN } from '../utils/ssn-redaction.js';
@@ -673,6 +673,32 @@ busCommand
 
     completeTask(paths, id, effectiveResult);
     console.log(`Completed ${id}`);
+  });
+
+busCommand
+  .command('audit-approval-coverage')
+  .description('Read-only cross-check: completed tasks that look like they needed a filed approval (--produces-approval flag, or a merge/branch/pushed/deploy signal) but have none from the assignee. Surfaces gaps for review, never blocks. See auditApprovalCoverage in bus/task.ts.')
+  .option('--agent <name>', 'Only audit tasks assigned to this agent')
+  .option('--format <fmt>', 'Output format: json|text', 'text')
+  .action((opts: { agent?: string; format?: string }) => {
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    const gaps = auditApprovalCoverage(paths, { agent: opts.agent });
+
+    if (opts.format === 'json') {
+      console.log(JSON.stringify(gaps, null, 2));
+      return;
+    }
+
+    if (gaps.length === 0) {
+      console.log('No approval-coverage gaps found.');
+      return;
+    }
+    console.log(`${gaps.length} approval-coverage gap(s):`);
+    for (const g of gaps) {
+      console.log(`  [${g.task_id}] ${g.title}`);
+      console.log(`    assignee: ${g.assignee} | completed: ${g.completed_at ?? 'n/a'} | signal: ${g.matched_signal}`);
+    }
   });
 
 busCommand

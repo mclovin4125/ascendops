@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { createTask, updateTask, completeTask, claimTask, readTaskAudit, checkTaskDependencies, compactTasks, listTasks, findTaskFile, archiveTasks } from '../../../src/bus/task';
+import { createTask, updateTask, completeTask, claimTask, readTaskAudit, checkTaskDependencies, compactTasks, listTasks, findTaskFile, archiveTasks, auditApprovalCoverage } from '../../../src/bus/task';
 import type { BusPaths } from '../../../src/types';
 
 describe('Task Management', () => {
@@ -415,6 +415,82 @@ describe('Task Management', () => {
         expect(warnLog).toHaveLength(0);
         expect(readGuardrailEvents('boris')).toHaveLength(0);
       });
+    });
+  });
+
+  describe('auditApprovalCoverage (S3, task_1791030564618_07839867)', () => {
+    function writeApproval(id: string, requestingAgent: string, createdAt: string): void {
+      mkdirSync(join(paths.approvalDir, 'pending'), { recursive: true });
+      writeFileSync(join(paths.approvalDir, 'pending', `${id}.json`), JSON.stringify({
+        id,
+        title: 'Test approval',
+        requesting_agent: requestingAgent,
+        org: 'acme',
+        category: 'deployment',
+        status: 'pending',
+        description: '',
+        created_at: createdAt,
+        updated_at: createdAt,
+        resolved_at: null,
+        resolved_by: null,
+      }), 'utf-8');
+    }
+
+    it('flags a completed task matching the text heuristic with no approval filed', () => {
+      const taskId = createTask(paths, 'paul', 'acme', 'Branch pushed for review', { assignee: 'boris' });
+      completeTask(paths, taskId, 'merged the fix into the feature branch');
+
+      const gaps = auditApprovalCoverage(paths);
+
+      expect(gaps.map((g) => g.task_id)).toContain(taskId);
+      const gap = gaps.find((g) => g.task_id === taskId)!;
+      expect(gap.assignee).toBe('boris');
+      expect(gap.matched_signal).toMatch(/merge|branch|pushed/i);
+    });
+
+    it('does not flag when a matching approval already exists', () => {
+      const taskId = createTask(paths, 'paul', 'acme', 'Branch pushed for review', { assignee: 'boris' });
+      const task = JSON.parse(readFileSync(join(paths.taskDir, `${taskId}.json`), 'utf-8'));
+      completeTask(paths, taskId, 'merged the fix');
+      writeApproval('approval_test_1', 'boris', task.created_at);
+
+      const gaps = auditApprovalCoverage(paths);
+
+      expect(gaps.map((g) => g.task_id)).not.toContain(taskId);
+    });
+
+    it('flags via the explicit flag even when the text has no heuristic match', () => {
+      const taskId = createTask(paths, 'paul', 'acme', 'Quarterly review', {
+        assignee: 'boris',
+        producesApproval: true,
+      });
+      completeTask(paths, taskId, 'done, nothing notable in the wording');
+
+      const gaps = auditApprovalCoverage(paths);
+
+      const gap = gaps.find((g) => g.task_id === taskId);
+      expect(gap?.matched_signal).toBe('flag');
+    });
+
+    it('does not flag an ordinary completed task with no flag and no heuristic match', () => {
+      const taskId = createTask(paths, 'paul', 'acme', 'Fix typo in README', { assignee: 'boris' });
+      completeTask(paths, taskId, 'fixed');
+
+      const gaps = auditApprovalCoverage(paths);
+
+      expect(gaps.map((g) => g.task_id)).not.toContain(taskId);
+    });
+
+    it('respects the --agent filter', () => {
+      const taskA = createTask(paths, 'paul', 'acme', 'Deployed service A', { assignee: 'boris' });
+      completeTask(paths, taskA, 'deployed');
+      const taskB = createTask(paths, 'paul', 'acme', 'Deployed service B', { assignee: 'carol' });
+      completeTask(paths, taskB, 'deployed');
+
+      const gaps = auditApprovalCoverage(paths, { agent: 'boris' });
+
+      expect(gaps.map((g) => g.task_id)).toContain(taskA);
+      expect(gaps.map((g) => g.task_id)).not.toContain(taskB);
     });
   });
 
