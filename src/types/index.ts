@@ -159,6 +159,20 @@ export interface Approval {
   correction_note?: string;
   corrected_at?: string;
   corrected_by?: string;
+  /**
+   * Set by refreshApprovalTitle (bus/approval.ts) when a pending approval's
+   * title no longer reflects reality (e.g. an EMERGENCY approval whose
+   * situation was downgraded weeks later, but the record still reads
+   * EMERGENCY — S1 from the 2026-10-03 self-eval, approval_1787140916_fitlj).
+   * `title` itself is NEVER overwritten — same append-only philosophy as
+   * `corrected` above: the original record stays exactly as filed, and
+   * `current_title` is what a reviewer should actually read today. Readers
+   * (list-approvals, a dashboard, etc.) should prefer `current_title` when
+   * present and fall back to `title` otherwise.
+   */
+  current_title?: string;
+  title_refreshed_at?: string;
+  title_refreshed_by?: string;
 }
 
 // Agent Config Types (config.json)

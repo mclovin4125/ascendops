@@ -377,6 +377,52 @@ export function correctApproval(
 }
 
 /**
+ * Refresh a pending approval's displayed title when the situation it
+ * describes has changed since it was filed (S1, 2026-10-03 self-eval —
+ * approval_1787140916_fitlj still reads EMERGENCY weeks after the
+ * underlying water-leak was downgraded). Append-only, same philosophy as
+ * correctApproval: the ORIGINAL `title` is never touched, so the record
+ * still shows exactly what was filed. `current_title` is set alongside it
+ * as what a reviewer should read today — readers should prefer
+ * `current_title` when present, falling back to `title` otherwise.
+ *
+ * Only applies to a still-pending approval — a resolved one is historical
+ * record and refreshing its title would rewrite what the decision was
+ * actually made against. If it's already resolved, this throws rather than
+ * silently writing a stale pending copy, mirroring markApprovalReminded's
+ * approach to the same distinction.
+ */
+export function refreshApprovalTitle(
+  paths: BusPaths,
+  approvalId: string,
+  newTitle: string,
+  refreshedBy: string,
+): void {
+  if (!newTitle || !newTitle.trim()) {
+    throw new Error('title refresh requires a non-empty replacement title');
+  }
+  const scrubbedTitle = redactSSN(newTitle);
+
+  const pendingFile = join(paths.approvalDir, 'pending', `${approvalId}.json`);
+  let approval: Approval;
+  try {
+    approval = JSON.parse(readFileSync(pendingFile, 'utf-8'));
+  } catch (err) {
+    const resolvedFile = join(paths.approvalDir, 'resolved', `${approvalId}.json`);
+    if (existsSync(resolvedFile)) {
+      throw new Error(`approval ${approvalId} is already resolved — its title is historical record, not refreshable`);
+    }
+    throw new Error(`approval ${approvalId} not found: ${err}`);
+  }
+
+  approval.current_title = scrubbedTitle;
+  approval.title_refreshed_at = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+  approval.title_refreshed_by = refreshedBy;
+
+  atomicWriteSync(pendingFile, JSON.stringify(approval));
+}
+
+/**
  * Default: flag a pending approval unresolved for 3h+.
  *
  * Deliberately set BELOW the default 4h heartbeat cadence, not equal to it.

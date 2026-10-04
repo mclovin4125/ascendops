@@ -28,7 +28,7 @@ vi.mock('../../../src/telegram/api', () => ({
 import { mkdtempSync, rmSync, readdirSync, readFileSync, existsSync, writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { createApproval, updateApproval, correctApproval, listPendingApprovals } from '../../../src/bus/approval';
+import { createApproval, updateApproval, correctApproval, listPendingApprovals, refreshApprovalTitle } from '../../../src/bus/approval';
 import type { BusPaths } from '../../../src/types';
 
 let testDir: string;
@@ -523,6 +523,56 @@ describe('correctApproval (WO #100059 incident, 2026-08-13)', () => {
 
     const approval = JSON.parse(readFileSync(join(paths.approvalDir, 'resolved', `${id}.json`), 'utf-8'));
     expect(approval.correction_note).not.toContain('123-45-6789');
+  });
+});
+
+describe('refreshApprovalTitle (S1, 2026-10-03 self-eval, approval_1787140916_fitlj)', () => {
+  it('sets current_title/title_refreshed_at/title_refreshed_by without touching the original title', async () => {
+    const id = await createApproval(paths, 'maintenance-director', 'TestOrg', 'EMERGENCY: active water leak', 'external-comms', undefined, frameworkRoot);
+
+    refreshApprovalTitle(paths, id, 'Water leak (downgraded, non-urgent follow-up)', 'ea');
+
+    const approval = JSON.parse(readFileSync(join(paths.approvalDir, 'pending', `${id}.json`), 'utf-8'));
+    expect(approval.title).toBe('EMERGENCY: active water leak');
+    expect(approval.current_title).toBe('Water leak (downgraded, non-urgent follow-up)');
+    expect(approval.title_refreshed_by).toBe('ea');
+    expect(approval.title_refreshed_at).toBeTruthy();
+  });
+
+  it('does not move or resolve the approval — it stays pending', async () => {
+    const id = await createApproval(paths, 'maintenance-director', 'TestOrg', 'EMERGENCY: active water leak', 'external-comms', undefined, frameworkRoot);
+
+    refreshApprovalTitle(paths, id, 'Downgraded', 'ea');
+
+    expect(existsSync(join(paths.approvalDir, 'pending', `${id}.json`))).toBe(true);
+    expect(existsSync(join(paths.approvalDir, 'resolved', `${id}.json`))).toBe(false);
+  });
+
+  it('refuses an empty replacement title', async () => {
+    const id = await createApproval(paths, 'maintenance-director', 'TestOrg', 'EMERGENCY: active water leak', 'external-comms', undefined, frameworkRoot);
+
+    expect(() => refreshApprovalTitle(paths, id, '', 'ea')).toThrow(/non-empty replacement title/);
+    expect(() => refreshApprovalTitle(paths, id, '   ', 'ea')).toThrow(/non-empty replacement title/);
+  });
+
+  it('refuses with a distinct error when the approval is already resolved', async () => {
+    const id = await createApproval(paths, 'maintenance-director', 'TestOrg', 'EMERGENCY: active water leak', 'external-comms', undefined, frameworkRoot);
+    updateApproval(paths, id, 'approved');
+
+    expect(() => refreshApprovalTitle(paths, id, 'Downgraded', 'ea')).toThrow(/already resolved/);
+  });
+
+  it('throws a clear error when the approval id does not exist at all', () => {
+    expect(() => refreshApprovalTitle(paths, 'approval_999_nope', 'Downgraded', 'ea')).toThrow(/not found/);
+  });
+
+  it('scrubs an SSN out of the refreshed title before persisting it', async () => {
+    const id = await createApproval(paths, 'maintenance-director', 'TestOrg', 'EMERGENCY: active water leak', 'external-comms', undefined, frameworkRoot);
+
+    refreshApprovalTitle(paths, id, 'Resident SSN 123-45-6789 referenced in error', 'ea');
+
+    const approval = JSON.parse(readFileSync(join(paths.approvalDir, 'pending', `${id}.json`), 'utf-8'));
+    expect(approval.current_title).not.toContain('123-45-6789');
   });
 });
 

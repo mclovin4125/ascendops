@@ -16,7 +16,7 @@ import { selfRestart, hardRestart, autoCommit, ensureGitRepoInitialized, checkGo
 import { createExperiment, runExperiment, evaluateExperiment, listExperiments, gatherContext, manageCycle, loadExperimentConfig } from '../bus/experiment.js';
 import { browseCatalog, installCommunityItem, prepareSubmission, submitCommunityItem } from '../bus/catalog.js';
 import { collectMetrics, parseUsageOutput, storeUsageData, checkUpstream, findStrandedBranches, collectTelegramCommands, registerTelegramCommands } from '../bus/metrics.js';
-import { createApproval, updateApproval, correctApproval } from '../bus/approval.js';
+import { createApproval, updateApproval, correctApproval, refreshApprovalTitle } from '../bus/approval.js';
 import { listActiveThreads, addActiveThread, updateActiveThread, removeActiveThread, clearActiveThreads } from '../bus/active-threads.js';
 import { listVendorDocPatterns, vendorDocPattern } from '../bus/vendor-patterns.js';
 import { createReminder, listReminders, ackReminder, pruneReminders } from '../bus/reminders.js';
@@ -1725,6 +1725,23 @@ busCommand
     }
   });
 
+busCommand
+  .command('refresh-approval-title')
+  .description('Refresh a pending approval\'s displayed title when the situation has changed since it was filed (append-only — the original title is left intact). See refreshApprovalTitle in bus/approval.ts.')
+  .argument('<id>', 'Approval ID (must still be pending)')
+  .argument('<title>', 'New title that reflects the current situation')
+  .action((id: string, title: string) => {
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    try {
+      refreshApprovalTitle(paths, id, title, env.agentName);
+      console.log(`Approval ${id} title refreshed.`);
+    } catch (err: any) {
+      console.error(`Failed to refresh approval title: ${err.message || err}`);
+      process.exit(1);
+    }
+  });
+
 // ---------------------------------------------------------------------------
 // Knowledge Base commands
 // ---------------------------------------------------------------------------
@@ -2409,8 +2426,10 @@ busCommand
 
     if (opts.format === 'text') {
       if (approvals.length === 0) { console.log(opts.stale ? 'No stale approvals' : 'No pending approvals'); return; }
-      for (const a of approvals as Array<{ id: string; title: string; category: string; requesting_agent: string; created_at: string; description?: string; org?: string; age_hours: number; stale: boolean }>) {
-        console.log(`[${a.id}]${a.stale ? ' [STALE]' : ''} ${a.title}`);
+      for (const a of approvals as Array<{ id: string; title: string; current_title?: string; category: string; requesting_agent: string; created_at: string; description?: string; org?: string; age_hours: number; stale: boolean }>) {
+        // Prefer the refreshed title (refresh-approval-title) over the
+        // original filed one — see current_title on the Approval type.
+        console.log(`[${a.id}]${a.stale ? ' [STALE]' : ''} ${a.current_title ?? a.title}`);
         console.log(`  Category: ${a.category} | Agent: ${a.requesting_agent} | Org: ${a.org ?? env.org} | Created: ${a.created_at} (${a.age_hours}h ago)`);
         if (a.description) console.log(`  Context: ${a.description}`);
         console.log('');
