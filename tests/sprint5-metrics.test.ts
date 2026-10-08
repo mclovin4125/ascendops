@@ -132,6 +132,22 @@ describe('Sprint 5: Observability & Metrics', () => {
       expect(report.system.approvals_pending).toBe(2);
     });
 
+    it('scopes approvals_pending to the calling org when org is specified, ignoring other orgs', () => {
+      writeFileSync(join(ctxRoot, 'config', 'enabled-agents.json'), '{}', 'utf-8');
+      writeFileSync(join(ctxRoot, 'approvals', 'pending', 'root1.json'), '{}', 'utf-8');
+      mkdirSync(join(ctxRoot, 'orgs', 'testorg', 'approvals', 'pending'), { recursive: true });
+      writeFileSync(join(ctxRoot, 'orgs', 'testorg', 'approvals', 'pending', 'ap1.json'), '{}', 'utf-8');
+      mkdirSync(join(ctxRoot, 'orgs', 'otherorg', 'approvals', 'pending'), { recursive: true });
+      writeFileSync(join(ctxRoot, 'orgs', 'otherorg', 'approvals', 'pending', 'ap1.json'), '{}', 'utf-8');
+      writeFileSync(join(ctxRoot, 'orgs', 'otherorg', 'approvals', 'pending', 'ap2.json'), '{}', 'utf-8');
+
+      const scoped = collectMetrics(ctxRoot, 'testorg');
+      expect(scoped.system.approvals_pending).toBe(2); // root + testorg only
+
+      const unscoped = collectMetrics(ctxRoot);
+      expect(unscoped.system.approvals_pending).toBe(4); // root + testorg + otherorg, no org given
+    });
+
     it('writes report to analytics/reports/latest.json', () => {
       writeFileSync(join(ctxRoot, 'config', 'enabled-agents.json'), '{}', 'utf-8');
       collectMetrics(ctxRoot);

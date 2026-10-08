@@ -227,7 +227,10 @@ export function collectMetrics(ctxRoot: string, org?: string): MetricsReport {
   // Count pending approvals
   let approvalsPending = 0;
   const approvalPaths = [join(ctxRoot, 'approvals', 'pending')];
-  if (existsSync(orgsDir)) {
+  if (org) {
+    const p = join(ctxRoot, 'orgs', org, 'approvals', 'pending');
+    if (existsSync(p)) approvalPaths.push(p);
+  } else if (existsSync(orgsDir)) {
     try {
       for (const orgEntry of readdirSync(orgsDir, { withFileTypes: true })) {
         if (orgEntry.isDirectory()) {
