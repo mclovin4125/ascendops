@@ -16,7 +16,7 @@ import { selfRestart, hardRestart, autoCommit, ensureGitRepoInitialized, checkGo
 import { createExperiment, runExperiment, evaluateExperiment, listExperiments, gatherContext, manageCycle, loadExperimentConfig } from '../bus/experiment.js';
 import { browseCatalog, installCommunityItem, prepareSubmission, submitCommunityItem } from '../bus/catalog.js';
 import { collectMetrics, parseUsageOutput, storeUsageData, checkUpstream, findStrandedBranches, collectTelegramCommands, registerTelegramCommands } from '../bus/metrics.js';
-import { createApproval, updateApproval, correctApproval } from '../bus/approval.js';
+import { createApproval, updateApproval, correctApproval, refreshApprovalContext } from '../bus/approval.js';
 import { listActiveThreads, addActiveThread, updateActiveThread, removeActiveThread, clearActiveThreads } from '../bus/active-threads.js';
 import { listVendorDocPatterns, vendorDocPattern } from '../bus/vendor-patterns.js';
 import { createReminder, listReminders, ackReminder, pruneReminders } from '../bus/reminders.js';
@@ -1725,6 +1725,23 @@ busCommand
     }
   });
 
+busCommand
+  .command('refresh-approval-context')
+  .description('Append a timestamped context note to a PENDING approval without touching status/resolved_at/resolved_by (for when scope grows while an approval is still waiting on a decision). See refreshApprovalContext in bus/approval.ts. For an already-resolved approval, use correct-approval instead.')
+  .argument('<id>', 'Approval ID (must still be pending)')
+  .argument('<note>', 'What changed since the approval was filed')
+  .action((id: string, note: string) => {
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    try {
+      refreshApprovalContext(paths, id, note, env.agentName);
+      console.log(`Approval ${id} context refreshed.`);
+    } catch (err: any) {
+      console.error(`Failed to refresh approval context: ${err.message || err}`);
+      process.exit(1);
+    }
+  });
+
 // ---------------------------------------------------------------------------
 // Knowledge Base commands
 // ---------------------------------------------------------------------------
@@ -2409,10 +2426,14 @@ busCommand
 
     if (opts.format === 'text') {
       if (approvals.length === 0) { console.log(opts.stale ? 'No stale approvals' : 'No pending approvals'); return; }
-      for (const a of approvals as Array<{ id: string; title: string; category: string; requesting_agent: string; created_at: string; description?: string; org?: string; age_hours: number; stale: boolean }>) {
+      for (const a of approvals as Array<{ id: string; title: string; category: string; requesting_agent: string; created_at: string; description?: string; org?: string; age_hours: number; stale: boolean; context_updates?: Array<{ note: string; updated_at: string; updated_by: string }> }>) {
         console.log(`[${a.id}]${a.stale ? ' [STALE]' : ''} ${a.title}`);
         console.log(`  Category: ${a.category} | Agent: ${a.requesting_agent} | Org: ${a.org ?? env.org} | Created: ${a.created_at} (${a.age_hours}h ago)`);
         if (a.description) console.log(`  Context: ${a.description}`);
+        if (a.context_updates && a.context_updates.length > 0) {
+          const latest = a.context_updates[a.context_updates.length - 1];
+          console.log(`  Latest update (${latest.updated_at} by ${latest.updated_by}): ${latest.note}`);
+        }
         console.log('');
       }
       console.log(`Total: ${approvals.length}${opts.stale ? ' stale' : ' pending'}`);

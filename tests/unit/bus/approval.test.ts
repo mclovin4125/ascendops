@@ -28,7 +28,7 @@ vi.mock('../../../src/telegram/api', () => ({
 import { mkdtempSync, rmSync, readdirSync, readFileSync, existsSync, writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { createApproval, updateApproval, correctApproval, listPendingApprovals } from '../../../src/bus/approval';
+import { createApproval, updateApproval, correctApproval, refreshApprovalContext, listPendingApprovals } from '../../../src/bus/approval';
 import type { BusPaths } from '../../../src/types';
 
 let testDir: string;
@@ -523,6 +523,72 @@ describe('correctApproval (WO #100059 incident, 2026-08-13)', () => {
 
     const approval = JSON.parse(readFileSync(join(paths.approvalDir, 'resolved', `${id}.json`), 'utf-8'));
     expect(approval.correction_note).not.toContain('123-45-6789');
+  });
+});
+
+describe('refreshApprovalContext (2026-10-08: m4roi scope grew while pending)', () => {
+  it('appends a context_updates entry to a pending approval without touching title/description/status', async () => {
+    const id = await createApproval(paths, 'dev', 'TestOrg', 'Decide upstream catch-up batch (39 commits, 476 files)', 'other', 'original context', frameworkRoot);
+
+    refreshApprovalContext(paths, id, 'Grew overnight to 45 commits, 487 files.', 'dev');
+
+    const pendingFile = join(paths.approvalDir, 'pending', `${id}.json`);
+    const approval = JSON.parse(readFileSync(pendingFile, 'utf-8'));
+    expect(approval.title).toBe('Decide upstream catch-up batch (39 commits, 476 files)');
+    expect(approval.description).toBe('original context');
+    expect(approval.status).toBe('pending');
+    expect(approval.resolved_at).toBeNull();
+    expect(approval.resolved_by).toBeNull();
+    expect(approval.context_updates).toHaveLength(1);
+    expect(approval.context_updates[0].note).toBe('Grew overnight to 45 commits, 487 files.');
+    expect(approval.context_updates[0].updated_by).toBe('dev');
+    expect(approval.context_updates[0].updated_at).toBeTruthy();
+  });
+
+  it('appends multiple updates in order without overwriting earlier ones', async () => {
+    const id = await createApproval(paths, 'dev', 'TestOrg', 'Batch', 'other', undefined, frameworkRoot);
+
+    refreshApprovalContext(paths, id, 'First update.', 'dev');
+    refreshApprovalContext(paths, id, 'Second update.', 'ea');
+
+    const approval = JSON.parse(readFileSync(join(paths.approvalDir, 'pending', `${id}.json`), 'utf-8'));
+    expect(approval.context_updates).toHaveLength(2);
+    expect(approval.context_updates[0].note).toBe('First update.');
+    expect(approval.context_updates[1].note).toBe('Second update.');
+    expect(approval.context_updates[1].updated_by).toBe('ea');
+  });
+
+  it('allows the requesting agent itself to refresh its own approval (not gated like self-resolution)', async () => {
+    const id = await createApproval(paths, 'dev', 'TestOrg', 'Batch', 'other', undefined, frameworkRoot);
+
+    expect(() => refreshApprovalContext(paths, id, 'Scope grew.', 'dev')).not.toThrow();
+  });
+
+  it('refuses a context refresh with no note', async () => {
+    const id = await createApproval(paths, 'dev', 'TestOrg', 'Batch', 'other', undefined, frameworkRoot);
+
+    expect(() => refreshApprovalContext(paths, id, '', 'dev')).toThrow(/non-empty note/);
+    expect(() => refreshApprovalContext(paths, id, '   ', 'dev')).toThrow(/non-empty note/);
+  });
+
+  it('refuses to refresh context on an already-resolved approval, pointing at correct-approval instead', async () => {
+    const id = await createApproval(paths, 'dev', 'TestOrg', 'Batch', 'other', undefined, frameworkRoot);
+    updateApproval(paths, id, 'approved', 'note', 'ea');
+
+    expect(() => refreshApprovalContext(paths, id, 'too late', 'dev')).toThrow(/already resolved.*correct-approval/);
+  });
+
+  it('throws a clear error when the approval id does not exist at all', () => {
+    expect(() => refreshApprovalContext(paths, 'approval_999_nope', 'note', 'dev')).toThrow(/not found/);
+  });
+
+  it('scrubs an SSN out of the context note before persisting it', async () => {
+    const id = await createApproval(paths, 'dev', 'TestOrg', 'Batch', 'other', undefined, frameworkRoot);
+
+    refreshApprovalContext(paths, id, 'Tenant SSN 123-45-6789 appeared in the new diff.', 'dev');
+
+    const approval = JSON.parse(readFileSync(join(paths.approvalDir, 'pending', `${id}.json`), 'utf-8'));
+    expect(approval.context_updates[0].note).not.toContain('123-45-6789');
   });
 });
 

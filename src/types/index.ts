@@ -159,6 +159,22 @@ export interface Approval {
   correction_note?: string;
   corrected_at?: string;
   corrected_by?: string;
+  /**
+   * Append-only log of context notes added while the approval is still
+   * PENDING (see refreshApprovalContext in bus/approval.ts — added
+   * 2026-10-08 after m4roi's scope grew from 39/476 to 45/487
+   * commits/files while it sat waiting on a decision, with no way to
+   * reflect that in the record itself). The original title/description
+   * are never touched — each entry is added, never edited or removed, so
+   * the record shows the full history of how scope moved while pending.
+   */
+  context_updates?: ApprovalContextUpdate[];
+}
+
+export interface ApprovalContextUpdate {
+  note: string;
+  updated_at: string;
+  updated_by: string;
 }
 
 // Agent Config Types (config.json)

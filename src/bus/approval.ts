@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, readFileSync } from 'fs';
 import { join } from 'path';
-import type { Approval, ApprovalCategory, ApprovalStatus, BusPaths } from '../types/index.js';
+import type { Approval, ApprovalCategory, ApprovalContextUpdate, ApprovalStatus, BusPaths } from '../types/index.js';
 import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
 import { parseEnvFile } from '../utils/env.js';
 import { randomString } from '../utils/random.js';
@@ -374,6 +374,65 @@ export function correctApproval(
       `Original decision: ${approval.status}\nCorrection note: ${scrubbedNote}`;
     sendMessage(paths, 'system', approval.requesting_agent, 'urgent', msg);
   }
+}
+
+/**
+ * Append a timestamped context note to a PENDING approval without touching
+ * status/resolved_at/resolved_by/title/description — fills the gap between
+ * createApproval (scope fixed at filing time) and correctApproval (only
+ * valid once resolved). Added 2026-10-08: m4roi grew from 39/476 to
+ * 45/487 commits/files while still pending, and nothing could reflect
+ * that in the approval record itself — the text Mack eventually read was
+ * already stale by the time he read it.
+ *
+ * Append-only, same shape as correctApproval: the original fields are left
+ * exactly as filed, so the record shows both what was originally scoped
+ * and how that scope moved while it sat waiting on a decision.
+ *
+ * Deliberately NOT gated the way updateApproval's resolvedByAgent check
+ * is — mirrors correctApproval's reasoning. This never changes what gets
+ * approved or by whom; it only adds visibility into how the ask changed,
+ * so the agent closest to noticing the drift (often the requesting agent
+ * itself) should be free to log it immediately.
+ *
+ * Only applies to an approval that is still pending — an already-resolved
+ * approval has nothing left to "refresh context" on; use correctApproval
+ * instead if the resolution itself needs a correction note.
+ */
+export function refreshApprovalContext(
+  paths: BusPaths,
+  approvalId: string,
+  note: string,
+  updatedBy: string,
+): void {
+  if (!note || !note.trim()) {
+    throw new Error('context refresh requires a non-empty note describing what changed');
+  }
+  const scrubbedNote = redactSSN(note);
+
+  const pendingFile = join(paths.approvalDir, 'pending', `${approvalId}.json`);
+  let approval: Approval;
+  try {
+    approval = JSON.parse(readFileSync(pendingFile, 'utf-8'));
+  } catch (err) {
+    // Distinguish "already resolved" from "never existed" — both land
+    // here (readFileSync throws either way), but the fix differs: a
+    // resolved approval has a different append-only path (correctApproval).
+    const resolvedFile = join(paths.approvalDir, 'resolved', `${approvalId}.json`);
+    if (existsSync(resolvedFile)) {
+      throw new Error(`approval ${approvalId} is already resolved — use correct-approval instead, not a context refresh`);
+    }
+    throw new Error(`pending approval ${approvalId} not found: ${err}`);
+  }
+
+  const update: ApprovalContextUpdate = {
+    note: scrubbedNote,
+    updated_at: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+    updated_by: updatedBy,
+  };
+  approval.context_updates = [...(approval.context_updates || []), update];
+
+  atomicWriteSync(pendingFile, JSON.stringify(approval));
 }
 
 /**
