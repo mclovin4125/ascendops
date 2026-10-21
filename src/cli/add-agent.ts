@@ -366,6 +366,16 @@ export const addAgentCommand = new Command('add-agent')
     console.log(`    1. Edit ${join('orgs', org, 'agents', name, '.env')} with your Telegram settings`);
     console.log(`    2. Customize identity files (IDENTITY.md, SOUL.md, GOALS.md)`);
     console.log(`    3. Start: cortextos start ${name}\n`);
+    // A new seat starting and sitting there is not the same as it being
+    // onboarded — a 2026-10-21 seat ran for hours with an empty memory/ and
+    // no goal cascade until its orchestrator noticed and nudged it by hand.
+    // These four checks are what closing that gap actually takes; none of
+    // them happen automatically just because the process is running.
+    console.log(`  Once ${name} is running, confirm (don't assume) it's actually onboarded:`);
+    console.log(`    4. Daily memory: ls orgs/${org}/agents/${name}/memory/ - should have today's file, not be empty`);
+    console.log(`    5. Heartbeat cron: cortextos bus list-crons ${name} - config.json's cron should have migrated in`);
+    console.log(`    6. Liveness: cortextos status - ${name} shows "running" with a PID and growing uptime`);
+    console.log(`    7. Goal cascade: GOALS.md should carry a real focus, not the template placeholder\n`);
   });
 
 /**
