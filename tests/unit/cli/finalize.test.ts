@@ -1,10 +1,21 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
+
+const fstatSyncMock = vi.fn();
+vi.mock('fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('fs')>();
+  return {
+    ...actual,
+    fstatSync: (...args: unknown[]) => fstatSyncMock(...args),
+  };
+});
+
 import {
   finalize,
   finalizeProcess,
   requestKeepAlive,
   shouldKeepAlive,
   resetKeepAlive,
+  stdinNeedsFinalizing,
   DRAIN_TIMEOUT_MS,
   type FinalizeDeps,
 } from '../../../src/cli/_finalize';
@@ -103,6 +114,29 @@ describe('finalize (drain-safe exit)', () => {
     };
     expect(() => finalize(0, h.deps)).not.toThrow();
     expect(h.exit).toHaveBeenCalledWith(0);
+  });
+});
+
+describe('stdinNeedsFinalizing (regular-file stdin vs. socket/pipe/tty)', () => {
+  afterEach(() => {
+    fstatSyncMock.mockReset();
+  });
+
+  it('is false when fd 0 is a regular file — the `while read ... < file` shell-loop case this fix targets', () => {
+    fstatSyncMock.mockReturnValue({ isFile: () => true });
+    expect(stdinNeedsFinalizing()).toBe(false);
+  });
+
+  it('is true when fd 0 is not a regular file (tty/socket/pipe) — preserves the Node 25 hang fix', () => {
+    fstatSyncMock.mockReturnValue({ isFile: () => false });
+    expect(stdinNeedsFinalizing()).toBe(true);
+  });
+
+  it('is false (safe no-touch default) when fstat on fd 0 throws', () => {
+    fstatSyncMock.mockImplementation(() => {
+      throw new Error('EBADF');
+    });
+    expect(stdinNeedsFinalizing()).toBe(false);
   });
 });
 

@@ -15,6 +15,8 @@
 // Dependencies are injected so the drain-before-exit invariant is unit-testable
 // without actually terminating the test process.
 
+import { fstatSync } from 'fs';
+
 export interface WritableLike {
   writableLength: number;
   write(chunk: string, cb: () => void): unknown;
@@ -103,13 +105,34 @@ export function resetKeepAlive(): void {
   keepAlive = false;
 }
 
+// A bus command run from a shell `while read ... < file` loop shares fd 0
+// with the parent's `read` builtin for the life of the loop. The Node-25 hang
+// this file guards against only happens with an inherited socket/pipe handle
+// (the daemon's PTY case); touching process.stdin for a plain file does
+// nothing useful and was observed breaking such loops (one bus invocation
+// constructing/"peeking" the shared fd fights the parent for it). So skip the
+// stdin touch entirely when fd 0 is a regular file.
+const noopStdin: StdinLike = {
+  pause: () => undefined,
+  unref: () => undefined,
+};
+
+export function stdinNeedsFinalizing(): boolean {
+  try {
+    return !fstatSync(0).isFile();
+  } catch {
+    // fd 0 closed or unstattable — nothing to pause/unref either way.
+    return false;
+  }
+}
+
 // Production wiring against the real process streams.
 export function finalizeProcess(code: number): void {
   if (keepAlive) return;
   finalize(code, {
     stdout: process.stdout as unknown as WritableLike,
     stderr: process.stderr as unknown as WritableLike,
-    stdin: process.stdin as unknown as StdinLike,
+    stdin: stdinNeedsFinalizing() ? (process.stdin as unknown as StdinLike) : noopStdin,
     exit: (c: number) => process.exit(c),
     setExitCode: (c: number) => {
       process.exitCode = c;

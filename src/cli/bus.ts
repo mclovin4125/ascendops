@@ -1690,11 +1690,16 @@ busCommand
   .command('update-approval')
   .description('Resolve an approval request')
   .argument('<id>', 'Approval ID')
-  .argument('<status>', 'Resolution: approved or denied')
+  .argument('<status>', 'Resolution: approved or rejected ("denied" accepted as an alias for rejected)')
   .argument('[note]', 'Resolution note')
   .action((id: string, status: string, note?: string) => {
     const validStatuses: ApprovalStatus[] = ['approved', 'rejected'];
-    if (!validStatuses.includes(status as ApprovalStatus)) {
+    // "denied" is not a real ApprovalStatus (see src/types/index.ts) but was
+    // the word the help text used to advertise, so callers reasonably typed
+    // it — accept it as an alias rather than just fixing the text out from
+    // under them.
+    const resolvedStatus = status === 'denied' ? 'rejected' : (status as ApprovalStatus);
+    if (!validStatuses.includes(resolvedStatus)) {
       console.error(`Invalid status '${status}'. Must be one of: approved, rejected`);
       process.exit(1);
     }
@@ -1704,8 +1709,8 @@ busCommand
     // self-resolution (an agent approving its own request) — see the
     // resolvedByAgent doc comment on updateApproval for why this is needed
     // here but not on the daemon's Telegram-callback / dashboard paths.
-    updateApproval(paths, id, status as ApprovalStatus, note, env.agentName);
-    console.log(`Approval ${id} -> ${status}`);
+    updateApproval(paths, id, resolvedStatus, note, env.agentName);
+    console.log(`Approval ${id} -> ${resolvedStatus}`);
   });
 
 busCommand
